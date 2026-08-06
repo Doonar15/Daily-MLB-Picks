@@ -41,30 +41,53 @@ def _write_all(records):
 def record_predictions(game_date: str, preds, top_pick_game_pks):
     """Append each of today's predictions to the history log, tagged with
     whether it was one of the day's Top Picks. Re-running the predictor for
-    a date that hasn't been graded yet replaces the prior entry for each
-    game_pk (weights/lineups can change closer to game time, so the latest
-    pre-game prediction wins). Once an entry has been graded, it's left
-    alone -- re-predicting a past date never silently erases a graded result.
+    a date that hasn't been graded yet updates the entry for each game_pk in
+    place (weights/lineups/pitchers can change closer to game time, so the
+    latest pre-game prediction is what gets graded) -- but two things are
+    preserved across re-runs rather than silently overwritten:
+
+      - is_top_pick is STICKY: once a game clears the confidence floor on
+        any run, it stays flagged as a Top Pick even if a later re-run's
+        recalculated probability drops it back below the threshold. A pick
+        that was shown to you shouldn't be able to un-become one just
+        because real lineups/pitchers posted later that day and moved the
+        number -- that's exactly the kind of swing worth being able to see
+        and evaluate later, not erase.
+      - probability_history accumulates every distinct raw confidence seen
+        for that game that day, each with a timestamp, so the ledger can
+        show "first seen 59.5%, later 55.6%" instead of just the final
+        number. Grading still uses the LATEST prediction (predicted_prob /
+        predicted_winner), since that's the fairest "final word" to judge --
+        the history is additional context, not a replacement for it.
+
+    Once an entry has been graded, it's left alone entirely -- re-predicting
+    a past date never silently erases or alters a graded result.
     """
     existing = _read_all()
-    already_graded_pks = {
-        r["game_pk"] for r in existing if r["date"] == game_date and r["graded"]
-    }
-    pred_pks = {p["game_pk"] for p in preds}
-    existing = [
-        r for r in existing
-        if not (r["date"] == game_date and r["game_pk"] in pred_pks and r["game_pk"] not in already_graded_pks)
-    ]
+    by_key = {(r["date"], r["game_pk"]): r for r in existing}
 
     for pred in preds:
-        if pred["game_pk"] in already_graded_pks:
-            continue
+        key = (game_date, pred["game_pk"])
+        prior = by_key.get(key)
+        if prior is not None and prior["graded"]:
+            continue  # never touch a graded entry
+
         if pred["home_win_prob"] >= pred["away_win_prob"]:
             predicted_winner, predicted_prob = pred["home_team"], pred["home_win_prob"]
         else:
             predicted_winner, predicted_prob = pred["away_team"], pred["away_win_prob"]
 
-        existing.append({
+        now = date.today().isoformat()
+        was_top_pick_before = bool(prior and prior.get("is_top_pick"))
+        is_top_pick_now = pred["game_pk"] in top_pick_game_pks
+
+        prob_history = list(prior["probability_history"]) if prior and "probability_history" in prior else (
+            [{"predicted_prob": prior["predicted_prob"], "recorded_at": prior["recorded_at"]}] if prior else []
+        )
+        if not prob_history or prob_history[-1]["predicted_prob"] != predicted_prob:
+            prob_history.append({"predicted_prob": predicted_prob, "recorded_at": now})
+
+        by_key[key] = {
             "date": game_date,
             "game_pk": pred["game_pk"],
             "matchup": f"{pred['away_team']} @ {pred['home_team']}",
@@ -73,14 +96,15 @@ def record_predictions(game_date: str, preds, top_pick_game_pks):
             "predicted_winner": predicted_winner,
             "predicted_prob": predicted_prob,
             "home_win_prob": pred["home_win_prob"],
-            "is_top_pick": pred["game_pk"] in top_pick_game_pks,
-            "recorded_at": date.today().isoformat(),
+            "is_top_pick": was_top_pick_before or is_top_pick_now,
+            "probability_history": prob_history,
+            "recorded_at": prior["recorded_at"] if prior else now,
             "graded": False,
             "actual_winner": None,
             "correct": None,
-        })
+        }
 
-    _write_all(existing)
+    _write_all(list(by_key.values()))
 
 
 def grade_predictions():

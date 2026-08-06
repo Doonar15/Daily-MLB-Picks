@@ -198,6 +198,13 @@ header {
 .pick-meta .adjusted-val { color: var(--gold); font-weight: 600; }
 .pick-meta .raw-val { color: var(--ink); font-weight: 600; }
 
+.pick-movement {
+  font-size: 11.5px;
+  color: var(--ink-faint);
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
 .result-pill {
   display: inline-flex;
   align-items: center;
@@ -269,7 +276,7 @@ footer code {
     <div class="summary-cell">
       <div class="summary-label">Picks graded</div>
       <div class="summary-value">6</div>
-      <div class="summary-sub">0 still pending</div>
+      <div class="summary-sub">1 still pending</div>
     </div>
   </div>
 
@@ -287,9 +294,10 @@ footer code {
         <div class="pick-matchup"><span class="fav">Houston Astros</span> <span class="vs">to beat</span> Toronto Blue Jays</div>
         <div class="pick-meta">
           <span><span class="metric-label">raw</span> <span class="raw-val">66.4%</span></span>
-          <span><span class="metric-label">adj</span> <span class="adjusted-val">58.2%</span></span>
+          <span><span class="metric-label">adj</span> <span class="adjusted-val">58.5%</span></span>
           <span><span class="metric-label">ML</span> -198</span>
         </div>
+        
       </div>
       <div class="result-pill loss"><span class="dot"></span>Lost</div>
     </div>
@@ -300,9 +308,10 @@ footer code {
         <div class="pick-matchup"><span class="fav">Chicago Cubs</span> <span class="vs">to beat</span> Los Angeles Dodgers</div>
         <div class="pick-meta">
           <span><span class="metric-label">raw</span> <span class="raw-val">64.4%</span></span>
-          <span><span class="metric-label">adj</span> <span class="adjusted-val">58.2%</span></span>
+          <span><span class="metric-label">adj</span> <span class="adjusted-val">58.5%</span></span>
           <span><span class="metric-label">ML</span> -181</span>
         </div>
+        
       </div>
       <div class="result-pill win"><span class="dot"></span>Won</div>
     </div>
@@ -313,9 +322,10 @@ footer code {
         <div class="pick-matchup"><span class="fav">Boston Red Sox</span> <span class="vs">to beat</span> Chicago White Sox</div>
         <div class="pick-meta">
           <span><span class="metric-label">raw</span> <span class="raw-val">61.4%</span></span>
-          <span><span class="metric-label">adj</span> <span class="adjusted-val">58.2%</span></span>
+          <span><span class="metric-label">adj</span> <span class="adjusted-val">58.5%</span></span>
           <span><span class="metric-label">ML</span> -159</span>
         </div>
+        
       </div>
       <div class="result-pill win"><span class="dot"></span>Won</div>
     </div>
@@ -326,9 +336,10 @@ footer code {
         <div class="pick-matchup"><span class="fav">Atlanta Braves</span> <span class="vs">to beat</span> Miami Marlins</div>
         <div class="pick-meta">
           <span><span class="metric-label">raw</span> <span class="raw-val">61.4%</span></span>
-          <span><span class="metric-label">adj</span> <span class="adjusted-val">58.2%</span></span>
+          <span><span class="metric-label">adj</span> <span class="adjusted-val">58.5%</span></span>
           <span><span class="metric-label">ML</span> -159</span>
         </div>
+        
       </div>
       <div class="result-pill win"><span class="dot"></span>Won</div>
     </div>
@@ -342,6 +353,7 @@ footer code {
           <span><span class="metric-label">adj</span> <span class="adjusted-val">52.8%</span></span>
           <span><span class="metric-label">ML</span> -148</span>
         </div>
+        
       </div>
       <div class="result-pill win"><span class="dot"></span>Won</div>
     </div>
@@ -355,8 +367,23 @@ footer code {
           <span><span class="metric-label">adj</span> <span class="adjusted-val">52.8%</span></span>
           <span><span class="metric-label">ML</span> -141</span>
         </div>
+        
       </div>
       <div class="result-pill win"><span class="dot"></span>Won</div>
+    </div>
+
+    <div class="pick-row">
+      <div class="pick-num">7</div>
+      <div class="pick-main">
+        <div class="pick-matchup"><span class="fav">Detroit Tigers</span> <span class="vs">to beat</span> Seattle Mariners</div>
+        <div class="pick-meta">
+          <span><span class="metric-label">raw</span> <span class="raw-val">54.6%</span></span>
+          <span><span class="metric-label">adj</span> <span class="adjusted-val">52.8%</span></span>
+          <span><span class="metric-label">ML</span> -120</span>
+        </div>
+        <div class="pick-movement">moved during the day: 59.6% &rarr; 55.6% &rarr; 54.6%</div>
+      </div>
+      <div class="result-pill pending"><span class="dot"></span>Pending</div>
     </div>
     </div>
   </section>

@@ -73,6 +73,23 @@ def _result_pill(record):
     return ("win", "Won") if record["correct"] else ("loss", "Lost")
 
 
+def _movement_note(record):
+    """If this game's raw confidence moved across re-runs (e.g. once
+    real lineups posted), show the trail: first-seen -> ... -> final.
+    Returns '' if there's no history or only one distinct value recorded.
+    """
+    history_entries = record.get("probability_history") or []
+    distinct = []
+    for entry in history_entries:
+        p = entry["predicted_prob"]
+        if not distinct or distinct[-1] != p:
+            distinct.append(p)
+    if len(distinct) < 2:
+        return ""
+    trail = " &rarr; ".join(f"{p*100:.1f}%" for p in distinct)
+    return f'<div class="pick-movement">moved during the day: {trail}</div>'
+
+
 def _pick_row_html(i, record):
     home, away = record["home_team"], record["away_team"]
     favorite = record["predicted_winner"]
@@ -87,6 +104,7 @@ def _pick_row_html(i, record):
     )
     pill_class, pill_label = _result_pill(record)
     ml_str = f"{ml:+d}" if ml is not None else "N/A"
+    movement_html = _movement_note(record)
 
     return f"""
     <div class="pick-row">
@@ -98,6 +116,7 @@ def _pick_row_html(i, record):
           {adj_html}
           <span><span class="metric-label">ML</span> {ml_str}</span>
         </div>
+        {movement_html}
       </div>
       <div class="result-pill {pill_class}"><span class="dot"></span>{pill_label}</div>
     </div>"""
@@ -380,6 +399,13 @@ header {{
 .pick-meta .metric-label {{ color: var(--ink-faint); font-variant-numeric: normal; }}
 .pick-meta .adjusted-val {{ color: var(--gold); font-weight: 600; }}
 .pick-meta .raw-val {{ color: var(--ink); font-weight: 600; }}
+
+.pick-movement {{
+  font-size: 11.5px;
+  color: var(--ink-faint);
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}}
 
 .result-pill {{
   display: inline-flex;
