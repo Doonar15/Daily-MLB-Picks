@@ -37,15 +37,21 @@ def get_season_start_date(season: int):
         return f"{season}-03-20"
 
 
-def get_schedule(game_date: str):
-    """Return list of games (with probable pitchers) for a given date (YYYY-MM-DD)."""
+def get_schedule(game_date: str, force_refresh: bool = False):
+    """Return list of games (with probable pitchers) for a given date (YYYY-MM-DD).
+
+    force_refresh bypasses the cache entirely -- used by grading, where an
+    hour-old "still in progress" snapshot would silently block a genuinely
+    final game from being graded until the cache naturally expired.
+    """
     cache_key = f"schedule|{game_date}"
     is_past = game_date < date.today().isoformat()
     ttl = HISTORICAL_TTL if is_past else SCHEDULE_TTL
 
-    cached_val = cache.get(cache_key, ttl)
-    if cached_val is not None:
-        return cached_val
+    if not force_refresh:
+        cached_val = cache.get(cache_key, ttl)
+        if cached_val is not None:
+            return cached_val
 
     url = f"{BASE}/schedule"
     params = {

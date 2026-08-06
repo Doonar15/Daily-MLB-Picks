@@ -122,7 +122,12 @@ def grade_predictions():
     scores_by_game_pk = {}
     for game_date in ungraded_dates:
         try:
-            games = api.get_schedule(game_date)
+            # force_refresh: an hour-old cached schedule snapshot could still
+            # show "in progress" for a game that has since gone final,
+            # silently blocking it from being graded until the cache expired
+            # on its own. Grading is explicitly about getting the current
+            # truth, so it always bypasses the cache here.
+            games = api.get_schedule(game_date, force_refresh=True)
         except Exception:
             continue
         for g in games:
