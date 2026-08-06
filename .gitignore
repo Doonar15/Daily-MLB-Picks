@@ -9,3 +9,4 @@ venv/
 mlb_predictor/.cache/
 mlb_predictor/.history/
 .claude/
+picks_report.html

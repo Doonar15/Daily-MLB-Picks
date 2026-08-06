@@ -31,6 +31,14 @@ REPORT_FILE = REPORT_DIR / "picks_report.html"
 # reads from.
 VISIBLE_REPORT_FILE = Path(__file__).parent.parent / "picks_report.html"
 
+# GitHub Pages only auto-serves a file literally named index.html as the
+# site's homepage -- it won't recognize picks_report.html no matter its
+# content. This third copy (identical content, root-level, same as
+# VISIBLE_REPORT_FILE) exists purely so `git add index.html && git push`
+# updates the live site. picks_report.html stays the one to double-click
+# locally; index.html is the one that matters to git/GitHub.
+PUBLISH_FILE = Path(__file__).parent.parent / "index.html"
+
 
 def _top_pick_records():
     return [r for r in history.get_all_predictions() if r["is_top_pick"]]
@@ -448,4 +456,5 @@ footer code {{
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     REPORT_FILE.write_text(doc)
     VISIBLE_REPORT_FILE.write_text(doc)  # same content, in a location Finder shows by default
+    PUBLISH_FILE.write_text(doc)  # same content again, named for GitHub Pages
     return VISIBLE_REPORT_FILE
