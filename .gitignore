@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.DS_Store
+.vscode/*
+!.vscode/settings.json
+mlb_predictor/.cache/
+mlb_predictor/.history/
+.claude/
