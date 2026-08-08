@@ -306,6 +306,56 @@ def get_confirmed_lineup(game_pk: int, home: bool):
     return order or None
 
 
+def get_live_game_state(game_pk: int):
+    """Return this game's current live state (inning, outs, score), fetched
+    fresh from the live feed on every call -- deliberately NOT disk-cached,
+    since even the shortest existing TTL (LINEUP_TTL, 15 min) would show a
+    stale score for an entire game to --scoreboard's 30-second polling loop.
+
+    Never raises: a network failure or an unexpected payload shape returns a
+    dict with "error" set and every other field None/False, so a caller can
+    treat this game as "not final, unavailable this cycle" and keep going
+    instead of crashing the whole display.
+
+    "is_final" is codedGameState == "F" -- the same check already used
+    elsewhere in this codebase (get_schedule, history.grade_predictions).
+    NOT abstractGameState: a postponed game can report
+    abstractGameState == "Final" while codedGameState == "D" and never
+    actually reach a real final score.
+    """
+    try:
+        data = _get(f"{BASE_V11}/game/{game_pk}/feed/live")
+    except requests.RequestException as e:
+        return {
+            "game_pk": game_pk, "detailed_state": None, "is_final": False,
+            "inning": None, "inning_state": None, "outs": None,
+            "home_score": None, "away_score": None, "error": str(e),
+        }
+
+    try:
+        status = data.get("gameData", {}).get("status", {})
+        linescore = data.get("liveData", {}).get("linescore", {})
+        home = linescore.get("teams", {}).get("home", {})
+        away = linescore.get("teams", {}).get("away", {})
+        return {
+            "game_pk": game_pk,
+            "detailed_state": status.get("detailedState"),
+            "is_final": status.get("codedGameState") == "F",
+            "inning": linescore.get("currentInning"),
+            "inning_state": linescore.get("inningState"),
+            "outs": linescore.get("outs"),
+            "home_score": home.get("runs"),
+            "away_score": away.get("runs"),
+            "error": None,
+        }
+    except (KeyError, AttributeError) as e:
+        return {
+            "game_pk": game_pk, "detailed_state": None, "is_final": False,
+            "inning": None, "inning_state": None, "outs": None,
+            "home_score": None, "away_score": None, "error": str(e),
+        }
+
+
 @cache.cached(ttl_seconds=STATS_TTL)
 def get_player_season_ops(player_id: int, season: int):
     """Return a hitter's season OPS, or None if unavailable."""

@@ -168,6 +168,13 @@ def get_all_predictions():
     return _read_all()
 
 
+def get_top_picks_for_date(game_date: str):
+    """Return the Top Pick records logged for a single date, graded or not.
+    Used by --scoreboard to know which games to track live.
+    """
+    return [r for r in _read_all() if r["date"] == game_date and r["is_top_pick"]]
+
+
 def summarize(top_picks_only=False):
     """Return win rate and Brier score over graded predictions, optionally
     restricted to entries that were a day's Top Pick.

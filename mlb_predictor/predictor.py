@@ -88,11 +88,14 @@ Usage:
   python -m mlb_predictor.predictor --backfill-statcast                  # ONE-TIME: pull Statcast data for the xwOBA blend
   python -m mlb_predictor.predictor --no-statcast                          # disable the Statcast xwOBA blend
   python -m mlb_predictor.predictor --clear-cache            # wipe the local API cache
+  python -m mlb_predictor.predictor --scoreboard                       # live-track today's Top Picks (inning/outs/score) until they're all Final
 """
 
 import argparse
+import os
 import sys
-from datetime import date, timedelta
+import time
+from datetime import date, datetime, timedelta
 
 try:
     import requests
@@ -106,6 +109,14 @@ from .model import DEFAULT_WEIGHTS, MIN_H2H_GAMES, implied_prob_from_moneyline, 
 
 TUNE_WINDOW_DAYS = 30
 TUNING_CACHE_TTL = 4 * 60 * 60  # rebuild the tuning dataset at most every 4 hours
+
+SCOREBOARD_REFRESH_SECONDS = 30
+# Safety valve: a postponed/suspended game's live feed can report "Scheduled"
+# indefinitely (verified against a real postponed game_pk that never
+# transitioned away from Preview/Scheduled) -- without this, --scoreboard
+# could run forever. 7h comfortably covers a single day's slate including
+# delays and extra innings.
+SCOREBOARD_MAX_RUNTIME_SECONDS = 7 * 60 * 60
 
 
 def get_tuned_weights(as_of_date: str, window_days: int, use_bullpen: bool, use_lineups: bool,
@@ -305,6 +316,163 @@ def print_top_picks(preds, min_confidence=calibration.MIN_PICK_CONFIDENCE):
     return {pred["game_pk"] for _, _, _, pred in top}
 
 
+def _ordinal(n):
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _format_first_pitch(game_datetime):
+    """Convert a schedule entry's UTC gameDate (e.g. '2026-08-07T23:10:00Z')
+    into a local H:MM AM/PM string, or 'TBD' if it's missing/unparseable.
+    """
+    if not game_datetime:
+        return "TBD"
+    try:
+        dt = datetime.fromisoformat(game_datetime.replace("Z", "+00:00")).astimezone()
+        return dt.strftime("%-I:%M %p")
+    except (ValueError, TypeError):
+        return "TBD"
+
+
+def _live_lead(pick, state):
+    """Return the team currently ahead in a live game's score, or None if
+    the game hasn't started (no score yet) or is tied.
+    """
+    home_score, away_score = state["home_score"], state["away_score"]
+    if home_score is None or away_score is None or home_score == away_score:
+        return None
+    return pick["home_team"] if home_score > away_score else pick["away_team"]
+
+
+def _render_scoreboard(picks, states, schedule_by_pk, game_date):
+    os.system("cls" if os.name == "nt" else "clear")
+    now_str = datetime.now().strftime("%-I:%M:%S %p")
+
+    print("=" * 80)
+    print(f"LIVE SCOREBOARD -- Top Picks for {game_date}        "
+          f"updated {now_str}  (refresh: {SCOREBOARD_REFRESH_SECONDS}s)")
+    print("=" * 80)
+    print()
+
+    final_count = 0
+    for i, pick in enumerate(picks, start=1):
+        state = states[pick["game_pk"]]
+        print(f"  {i}. {pick['away_team']} @ {pick['home_team']}")
+        pick_line = f"     Pick:   {pick['predicted_winner']} to win (raw {pick['predicted_prob']*100:.1f}%)"
+
+        if state["error"]:
+            print("     Status: live data unavailable this cycle (will retry)")
+            print(pick_line)
+        elif state["is_final"]:
+            final_count += 1
+            leader = _live_lead(pick, state)
+            result = "WIN" if leader == pick["predicted_winner"] else "LOSS"
+            print("     Status: FINAL")
+            print(f"     Score:  {pick['away_team']} {state['away_score']} - {pick['home_team']} {state['home_score']}")
+            print(f"{pick_line}      Result: {result}")
+        elif state["inning"] is None:
+            g = schedule_by_pk.get(pick["game_pk"])
+            first_pitch = _format_first_pitch(g["game_datetime"]) if g else "TBD"
+            print(f"     Status: Scheduled -- first pitch {first_pitch}")
+            print(pick_line)
+        else:
+            print(f"     Status: {state['inning_state']} {_ordinal(state['inning'])}, {state['outs']} out")
+            print(f"     Score:  {pick['away_team']} {state['away_score']} - {pick['home_team']} {state['home_score']}")
+            leader = _live_lead(pick, state)
+            if leader is None:
+                live_check = "tied" if state["home_score"] == state["away_score"] else "not started"
+            else:
+                live_check = f"leading {leader} -> {'CORRECT' if leader == pick['predicted_winner'] else 'INCORRECT'}"
+            print(f"{pick_line}      Live check: {live_check}")
+
+        if i < len(picks):
+            print()
+            print("-" * 80)
+            print()
+
+    print()
+    print("=" * 80)
+    remaining = len(picks) - final_count
+    if remaining:
+        print(f"  {remaining} in progress / scheduled, {final_count} Final. Waiting for all games to finish...")
+    else:
+        print(f"  All {final_count} game(s) Final.")
+    print("=" * 80)
+
+
+def _print_scoreboard_summary(game_date, incomplete):
+    history.grade_predictions()
+    picks = history.get_top_picks_for_date(game_date)
+
+    print()
+    print("=" * 80)
+    print(f"FINAL SUMMARY -- Top Picks for {game_date}")
+    print("=" * 80)
+
+    wins = losses = 0
+    for pick in picks:
+        label = f"  {pick['predicted_winner']} ({pick['predicted_prob']*100:.1f}%)"
+        if pick["graded"]:
+            if pick["correct"]:
+                wins += 1
+                result = "WIN"
+            else:
+                losses += 1
+                result = "LOSS"
+            print(f"{label:<40} final: {pick['actual_winner']} won   -> {result}")
+        else:
+            print(f"{label:<40} -- not final yet (postponed/suspended?)")
+
+    print("-" * 80)
+    graded_total = wins + losses
+    if graded_total:
+        print(f"  Top Picks today: {wins}-{losses} ({wins / graded_total * 100:.1f}%)")
+    else:
+        print("  No picks graded yet.")
+    print("=" * 80)
+    if incomplete:
+        print("(Stopped before every game reached Final -- rerun --grade-picks later to catch stragglers.)")
+
+
+def run_scoreboard(game_date):
+    picks = history.get_top_picks_for_date(game_date)
+    if not picks:
+        print(f"No Top Picks recorded for {game_date}.")
+        print("Run the predictor for this date (without --no-record) to generate Top Picks first, then retry --scoreboard.")
+        return
+
+    schedule_by_pk = {g["game_pk"]: g for g in api.get_schedule(game_date)}
+
+    print(f"Tracking {len(picks)} Top Pick(s) for {game_date}. "
+          f"Refreshing every {SCOREBOARD_REFRESH_SECONDS}s -- Ctrl+C to stop early.\n")
+    time.sleep(2)  # let the message above actually be readable before the first clear
+
+    start = time.time()
+    stopped_early = False
+    try:
+        while True:
+            states = {p["game_pk"]: api.get_live_game_state(p["game_pk"]) for p in picks}
+            _render_scoreboard(picks, states, schedule_by_pk, game_date)
+
+            if all(states[p["game_pk"]]["is_final"] for p in picks):
+                break
+            if time.time() - start > SCOREBOARD_MAX_RUNTIME_SECONDS:
+                print(f"\nStopping after {SCOREBOARD_MAX_RUNTIME_SECONDS // 3600}h without every "
+                      "game reaching Final -- one or more may be postponed/suspended. "
+                      "Check statsapi/MLB.com directly for those.")
+                stopped_early = True
+                break
+            time.sleep(SCOREBOARD_REFRESH_SECONDS)
+    except KeyboardInterrupt:
+        print("\nStopped by user.")
+        stopped_early = True
+
+    _print_scoreboard_summary(game_date, incomplete=stopped_early)
+
+
 def main():
     parser = argparse.ArgumentParser(description="MLB game outcome predictor")
     parser.add_argument("--date", default=date.today().isoformat(),
@@ -339,6 +507,9 @@ def main():
                          help="Check recorded predictions against final scores, print the real-time track record, and regenerate the Top Picks HTML ledger, instead of predicting a day")
     parser.add_argument("--report", action="store_true",
                          help="Regenerate the Top Picks HTML ledger from current data without grading first, instead of predicting a day")
+    parser.add_argument("--scoreboard", action="store_true",
+                         help="Live-track today's Top Picks (inning/outs/score vs. the model's pick), refreshing every "
+                              f"{SCOREBOARD_REFRESH_SECONDS}s until all are Final, instead of predicting a day. Uses --date to pick the day (default: today).")
     parser.add_argument("--no-record", action="store_true",
                          help="Don't save this run's predictions to the history log")
     parser.add_argument("--backfill-history", nargs="?", const="DEFAULT", default=None, metavar="START_DATE",
@@ -387,6 +558,10 @@ def main():
         report_path = report.generate()
         print(f"Top Picks ledger updated: {report_path}")
         print(f"Open it: file://{report_path.resolve()}")
+        return
+
+    if args.scoreboard:
+        run_scoreboard(args.date)
         return
 
     if args.backfill_history is not None:
