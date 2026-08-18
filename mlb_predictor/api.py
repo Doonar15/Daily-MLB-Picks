@@ -236,6 +236,40 @@ def get_pitcher_era(pitcher_id: int, season: int):
 
 
 @cache.cached(ttl_seconds=STATS_TTL)
+def get_pitcher_game_log(pitcher_id: int, season: int):
+    """Return this pitcher's starts so far this season, oldest first: a list
+    of {"date", "strikeouts", "batters_faced"} dicts. Relief appearances
+    (gamesStarted == 0) are excluded -- this is meant for projecting a
+    probable starter's next start, not general workload.
+    """
+    if pitcher_id is None:
+        return []
+    url = f"{BASE}/people/{pitcher_id}/stats"
+    params = {"stats": "gameLog", "group": "pitching", "season": season}
+    try:
+        data = _get(url, params)
+        splits = data["stats"][0]["splits"]
+    except (KeyError, IndexError, requests.RequestException):
+        return []
+
+    log = []
+    for s in splits:
+        stat = s.get("stat", {})
+        if not stat.get("gamesStarted"):
+            continue
+        try:
+            log.append({
+                "date": s["date"],
+                "strikeouts": int(stat["strikeOuts"]),
+                "batters_faced": int(stat["battersFaced"]),
+            })
+        except (KeyError, ValueError):
+            continue
+    log.sort(key=lambda r: r["date"])
+    return log
+
+
+@cache.cached(ttl_seconds=STATS_TTL)
 def get_bullpen_era_l30(team_id: int, as_of_date: str):
     """Return the team's bullpen (relief-only) ERA over the 30 days ending
     as_of_date, computed by aggregating earned runs / innings pitched across

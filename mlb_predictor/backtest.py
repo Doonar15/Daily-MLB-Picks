@@ -289,6 +289,108 @@ def tune_weights(dataset, base_weights: Weights = DEFAULT_WEIGHTS, passes: int =
     return best, best_score
 
 
+def skill_trend(start_date: str, end_date: str, window_days: int = 30, step_days: int = 14, **flags):
+    """Answer "is the model's current thin edge new or chronic?" by repeating
+    the live auto-tuner's exact procedure (fresh coordinate descent from
+    DEFAULT_WEIGHTS, scored via Brier) over a series of trailing windows
+    stepped across a wide date range, instead of just the single trailing-30-
+    day window get_tuned_weights() uses for live predictions.
+
+    Each window is fetched independently (no reuse of get_tuned_weights()'s
+    disk cache, which is only keyed for the single current window), so this
+    is call-volume-heavy for a wide range -- expect roughly a window's worth
+    of fetch_tuning_dataset() time per step, not an instant report.
+
+    Returns a list of dicts (oldest window first): window_start, window_end,
+    n_games, baseline_brier, tuned_brier.
+    """
+    rows = []
+    window_end = date.fromisoformat(start_date) + timedelta(days=window_days - 1)
+    final_end = date.fromisoformat(end_date)
+    while window_end <= final_end:
+        window_start = window_end - timedelta(days=window_days - 1)
+        dataset = fetch_tuning_dataset(window_start.isoformat(), window_end.isoformat(), **flags)
+        baseline = evaluate_weights(dataset, DEFAULT_WEIGHTS)
+        _, tuned = tune_weights(dataset, DEFAULT_WEIGHTS)
+        rows.append({
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "n_games": len(dataset),
+            "baseline_brier": baseline,
+            "tuned_brier": tuned,
+        })
+        window_end += timedelta(days=step_days)
+
+    return rows
+
+
+def print_skill_trend_report(rows):
+    print("=" * 70)
+    print("SKILL TREND  (rolling trailing-window Brier score, coin flip = 0.2500)")
+    print("=" * 70)
+    if not rows:
+        print("  No windows evaluated.")
+        print()
+        return
+
+    print(f"  {'window end':<12}{'n':>6}{'baseline':>12}{'tuned':>12}")
+    for r in rows:
+        if r["n_games"] == 0 or r["baseline_brier"] is None:
+            print(f"  {r['window_end']:<12}{r['n_games']:>6}   no completed games in this window")
+            continue
+        print(f"  {r['window_end']:<12}{r['n_games']:>6}{r['baseline_brier']:>12.4f}{r['tuned_brier']:>12.4f}")
+
+    print()
+    print("  A window near 0.2500 has little real edge over a coin flip in that")
+    print("  stretch, tuned or not. Compare early vs. recent windows to see")
+    print("  whether current thin edge is a new dip or the season's norm.")
+    print()
+
+
+def blend_weights(raw: Weights, previous_smoothed: Weights, alpha: float) -> Weights:
+    """Exponentially smooth a freshly-tuned Weights against the last logged
+    smoothed value, so one noisy day's coordinate-descent result can't swing
+    live weights by itself (e.g. h2h_weight/travel_weight roughly halving
+    overnight between the Aug 13 and Aug 14 tuning runs). Only the tunable
+    fields are blended; *_cap fields pass through from raw unchanged (tune_weights
+    never touches them -- they're always DEFAULT_WEIGHTS' values).
+
+    alpha is the weight given to the new raw value: alpha=1.0 is no smoothing
+    (matches today's fresh-tune-every-day behavior), lower alpha damps faster-
+    moving noise at the cost of slower response to a genuine regime shift.
+
+    A convex blend (alpha in [0,1]) of two values already inside
+    _FIELD_BOUNDS[field] is always inside that bound too, so no reclamping is
+    mathematically required -- it's applied anyway as cheap insurance.
+    """
+    values = {}
+    for field in _TUNABLE_FIELDS:
+        blended = alpha * getattr(raw, field) + (1 - alpha) * getattr(previous_smoothed, field)
+        lo, hi = _FIELD_BOUNDS[field]
+        values[field] = max(lo, min(hi, round(blended, 4)))
+    return replace(raw, **values)
+
+
+def print_smoothing_summary(raw: Weights, smoothed: Weights, alpha: float):
+    moved = []
+    for field in _TUNABLE_FIELDS:
+        raw_v, smoothed_v = getattr(raw, field), getattr(smoothed, field)
+        if raw_v == 0:
+            continue
+        if abs(smoothed_v - raw_v) / abs(raw_v) > 0.01:
+            moved.append((field, raw_v, smoothed_v))
+
+    print("-" * 70)
+    print(f"WEIGHT SMOOTHING  (alpha={alpha}, damping today's raw tune against prior smoothed history)")
+    print("-" * 70)
+    if not moved:
+        print("  No tunable weight moved more than 1% after smoothing.")
+    else:
+        for field, raw_v, smoothed_v in moved:
+            print(f"  {field:<24} raw tuned to {raw_v:.4f}  ->  using {smoothed_v:.4f}")
+    print()
+
+
 def print_tuning_summary(weights: Weights, score, baseline_score, games_used):
     print("-" * 70)
     print(f"AUTO-TUNED WEIGHTS  (from {games_used} recent completed games)")
