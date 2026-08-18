@@ -8,5 +8,6 @@ venv/
 !.vscode/settings.json
 mlb_predictor/.cache/
 mlb_predictor/.history/
+mlb_predictor/data/
 .claude/
 picks_report.html

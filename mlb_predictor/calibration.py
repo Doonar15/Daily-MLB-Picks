@@ -59,20 +59,54 @@ BUCKET_EDGES = [0.50, 0.60, 0.70, 0.80, 0.90, 1.001]  # 1.001 so 100% sorts into
 # gap is exactly what's worth seeing, not hiding by thresholding post-adjustment.
 MIN_PICK_CONFIDENCE = 0.58
 
+# Minimum raw confidence for a Top Pick to also count as a backtested ROI
+# pick -- a much narrower, betting-specific bar than MIN_PICK_CONFIDENCE.
+# Originally set to 0.75 from a RAW-confidence sweep (2025+2026 pooled,
+# 4,118 games): only >=75% raw with no favorite cap showed a real edge
+# (+4.2% ROI, 85.8% P(profit), 240 picks). Re-run on CALIBRATION-ADJUSTED
+# confidence once the 70-80%/80-90% buckets had real sample sizes (n=481,
+# n=98) told a sharper story: the 70-80% raw tier's true win rate is only
+# 59.5% and showed NO edge anywhere (every cell net negative); the edge was
+# entirely concentrated in the 80-90% raw tier (true win rate 69.4%) --
+# +3.7% ROI/72.4% P(profit) uncapped (91 picks), up to +6.4%/75.9% P(profit)
+# with a -250 favorite cap (60 picks). The old 0.75 bar was diluting that
+# real, concentrated signal with a much larger pool of 70-80% picks that
+# had no edge at all -- raised to 0.80 to isolate just the tier that
+# actually showed one. Smaller sample than the original 75% finding (60-91
+# picks vs. 240), so still the leading hypothesis, not a proven edge -- see
+# unit_roi_backtest.py's docstring and its --adjusted-confidence sweep mode
+# for the full methodology.
+ROI_PICK_CONFIDENCE = 0.80
+
+# Minimum expected-ROI (expected profit / risked amount) required for a pick
+# to count as RECOMMENDED when live market odds are available (see
+# live_odds.py / unit_roi_backtest.expected_value). EV is computed from
+# calibration-adjusted confidence against the real market price, so this
+# margin exists purely as a safety buffer for model/calibration error --
+# a razor-thin EV>0% shouldn't be trusted as a real edge. 3% is a starting
+# point roughly in line with the magnitude of edges actually found across
+# this project's backtesting (single digits, not huge); revisit once there's
+# a real-money or paper-tracked EV-pick record to check it against.
+EV_ROI_MARGIN = 0.03
+
 # Buckets used for Top Picks display/threshold purposes specifically (as
-# opposed to bucket_report's fixed 10-point report buckets above). Only
-# 50-60%/60-70% are active given the sample sizes seen so far -- 70%+ bands
-# have too few games (n=95, n=9, n=2) to trust their measured gap, and
-# widening the top band would just borrow the (also noisy) 70-80% gap for a
-# high-stakes adjustment. Kept here, commented out, so re-enabling any tier
-# is a one-line change once its sample size is large enough to trust --
-# check bucket_report() output before flipping one on.
+# opposed to bucket_report's fixed 10-point report buckets above), after a
+# calibration backfill extending back through the full 2025 season:
+# 70-80%: n=481, -14.3pt gap. 80-90%: n=98, -14.4pt gap -- both now real,
+# usable samples with a consistent, similar-magnitude overconfidence gap
+# to each other, so both are enabled. 90-100% stays disabled at n=27 --
+# bigger than before but still thin, and its measured gap (-38.0pt, actual
+# win rate barely above a coin flip) is extreme enough that it needs a
+# larger sample before trusting it rather than treating it as a fluke.
+# Kept here, commented out, so re-enabling it is a one-line change once its
+# sample size is large enough to trust -- check bucket_report() output
+# before flipping it on.
 ADJUSTMENT_BUCKETS = [
     (0.50, 0.60),
     (0.60, 0.70),
-    # (0.70, 0.80),  # n=95 as of last check -- re-enable once this has a few hundred+ games
-    # (0.80, 0.90),  # n=9 as of last check -- far too small to trust
-    # (0.90, 1.001), # n=2 as of last check -- pure noise right now
+    (0.70, 0.80),  # n=481 as of last check
+    (0.80, 0.90),  # n=98 as of last check
+    # (0.90, 1.001), # n=27 as of last check -- still too thin, extreme measured gap
 ]
 
 

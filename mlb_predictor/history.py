@@ -12,7 +12,7 @@ import json
 from datetime import date
 from pathlib import Path
 
-from . import api
+from . import api, calibration
 
 HISTORY_DIR = Path(__file__).parent / ".history"
 HISTORY_FILE = HISTORY_DIR / "predictions.jsonl"
@@ -38,16 +38,16 @@ def _write_all(records):
     HISTORY_FILE.write_text("\n".join(json.dumps(r) for r in records) + ("\n" if records else ""))
 
 
-def record_predictions(game_date: str, preds, top_pick_game_pks):
+def record_predictions(game_date: str, preds, top_pick_game_pks, roi_pick_game_pks=()):
     """Append each of today's predictions to the history log, tagged with
-    whether it was one of the day's Top Picks. Re-running the predictor for
-    a date that hasn't been graded yet updates the entry for each game_pk in
-    place (weights/lineups/pitchers can change closer to game time, so the
-    latest pre-game prediction is what gets graded) -- but two things are
-    preserved across re-runs rather than silently overwritten:
+    whether it was one of the day's Top Picks and/or ROI Picks. Re-running
+    the predictor for a date that hasn't been graded yet updates the entry
+    for each game_pk in place (weights/lineups/pitchers can change closer to
+    game time, so the latest pre-game prediction is what gets graded) -- but
+    a few things are preserved across re-runs rather than silently overwritten:
 
-      - is_top_pick is STICKY: once a game clears the confidence floor on
-        any run, it stays flagged as a Top Pick even if a later re-run's
+      - is_top_pick / is_roi_pick are both STICKY: once a game clears the
+        respective bar on any run, it stays flagged even if a later re-run's
         recalculated probability drops it back below the threshold. A pick
         that was shown to you shouldn't be able to un-become one just
         because real lineups/pitchers posted later that day and moved the
@@ -80,6 +80,8 @@ def record_predictions(game_date: str, preds, top_pick_game_pks):
         now = date.today().isoformat()
         was_top_pick_before = bool(prior and prior.get("is_top_pick"))
         is_top_pick_now = pred["game_pk"] in top_pick_game_pks
+        was_roi_pick_before = bool(prior and prior.get("is_roi_pick"))
+        is_roi_pick_now = pred["game_pk"] in roi_pick_game_pks
 
         prob_history = list(prior["probability_history"]) if prior and "probability_history" in prior else (
             [{"predicted_prob": prior["predicted_prob"], "recorded_at": prior["recorded_at"]}] if prior else []
@@ -97,6 +99,7 @@ def record_predictions(game_date: str, preds, top_pick_game_pks):
             "predicted_prob": predicted_prob,
             "home_win_prob": pred["home_win_prob"],
             "is_top_pick": was_top_pick_before or is_top_pick_now,
+            "is_roi_pick": was_roi_pick_before or is_roi_pick_now,
             "probability_history": prob_history,
             "recorded_at": prior["recorded_at"] if prior else now,
             "graded": False,
@@ -175,13 +178,24 @@ def get_top_picks_for_date(game_date: str):
     return [r for r in _read_all() if r["date"] == game_date and r["is_top_pick"]]
 
 
-def summarize(top_picks_only=False):
+def get_roi_picks_for_date(game_date: str):
+    """Return the ROI Pick records logged for a single date, graded or not --
+    the narrower, backtested-profitable subset of Top Picks (see
+    calibration.ROI_PICK_CONFIDENCE). Older records predating this field
+    won't have it and are treated as not an ROI pick.
+    """
+    return [r for r in _read_all() if r["date"] == game_date and r.get("is_roi_pick")]
+
+
+def summarize(top_picks_only=False, roi_picks_only=False):
     """Return win rate and Brier score over graded predictions, optionally
-    restricted to entries that were a day's Top Pick.
+    restricted to entries that were a day's Top Pick and/or ROI Pick.
     """
     records = [r for r in _read_all() if r["graded"]]
     if top_picks_only:
         records = [r for r in records if r["is_top_pick"]]
+    if roi_picks_only:
+        records = [r for r in records if r.get("is_roi_pick")]
 
     if not records:
         return {"graded_games": 0, "accuracy": None, "brier_score": None}
@@ -200,6 +214,7 @@ def print_track_record():
     ungraded = len([r for r in _read_all() if not r["graded"]])
     overall = summarize(top_picks_only=False)
     top_picks = summarize(top_picks_only=True)
+    roi_picks = summarize(roi_picks_only=True)
 
     print("=" * 70)
     print("REAL-TIME TRACK RECORD  (actual predictions vs. actual results)")
@@ -218,6 +233,12 @@ def print_track_record():
               f"{top_picks['accuracy']*100:.1f}% correct, Brier {top_picks['brier_score']:.4f}")
     else:
         print("  Top Picks only:    no graded Top Picks yet")
+    if roi_picks["graded_games"] > 0:
+        print(f"  ROI Picks only:    {roi_picks['graded_games']} graded, "
+              f"{roi_picks['accuracy']*100:.1f}% correct, Brier {roi_picks['brier_score']:.4f}  "
+              f"(backtested >={calibration.ROI_PICK_CONFIDENCE*100:.0f}% confidence subset)")
+    else:
+        print("  ROI Picks only:    no graded ROI Picks yet")
     if ungraded:
         print(f"  ({ungraded} recorded prediction(s) still awaiting a final score)")
     print()

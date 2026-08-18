@@ -90,6 +90,18 @@ def _movement_note(record):
     return f'<div class="pick-movement">moved during the day: {trail}</div>'
 
 
+def _roi_badge_html(record):
+    """Small badge distinguishing a backtested-ROI pick from a plain Top
+    Pick that happened to clear the (much lower) Top Pick floor. Missing
+    is_roi_pick (pre-migration graded records) falls through to
+    "Not recommended" via .get(), same tolerant-access pattern history.py
+    already uses -- an old record is never misread as recommended.
+    """
+    if record.get("is_roi_pick"):
+        return '<div class="roi-badge recommended">Recommended</div>'
+    return '<div class="roi-badge not-recommended">Not recommended</div>'
+
+
 def _pick_row_html(i, record):
     home, away = record["home_team"], record["away_team"]
     favorite = record["predicted_winner"]
@@ -105,12 +117,14 @@ def _pick_row_html(i, record):
     pill_class, pill_label = _result_pill(record)
     ml_str = f"{ml:+d}" if ml is not None else "N/A"
     movement_html = _movement_note(record)
+    roi_badge_html = _roi_badge_html(record)
 
     return f"""
     <div class="pick-row">
       <div class="pick-num">{i}</div>
       <div class="pick-main">
         <div class="pick-matchup"><span class="fav">{html.escape(favorite)}</span> <span class="vs">to beat</span> {html.escape(underdog)}</div>
+        {roi_badge_html}
         <div class="pick-meta">
           <span><span class="metric-label">raw</span> <span class="raw-val">{raw_prob*100:.1f}%</span></span>
           {adj_html}
@@ -154,6 +168,24 @@ def generate():
     season = _season_record(records)
     ungraded_count = sum(1 for r in records if not r["graded"])
 
+    roi_records = [r for r in records if r.get("is_roi_pick")]
+    roi_season = _season_record(roi_records)
+    if roi_season:
+        roi_wins, roi_losses, roi_total = roi_season
+        roi_summary_cell = f"""
+    <div class="summary-cell">
+      <div class="summary-label">ROI Picks record</div>
+      <div class="summary-value accent">{roi_wins}–{roi_losses}</div>
+      <div class="summary-sub">{roi_wins / roi_total * 100:.1f}% ({roi_total} graded, >={calibration.ROI_PICK_CONFIDENCE*100:.0f}% conf)</div>
+    </div>"""
+    else:
+        roi_summary_cell = f"""
+    <div class="summary-cell">
+      <div class="summary-label">ROI Picks record</div>
+      <div class="summary-value accent">—</div>
+      <div class="summary-sub">no graded ROI picks yet</div>
+    </div>"""
+
     most_recent_date = next(iter(by_date), None)
     graded_dates = len({d for d, recs in by_date.items() if _day_record(recs) is not None})
 
@@ -165,7 +197,7 @@ def generate():
       <div class="summary-label">Record</div>
       <div class="summary-value accent">{season_wins}–{season_losses}</div>
       <div class="summary-sub">{season_pct:.1f}% overall</div>
-    </div>
+    </div>{roi_summary_cell}
     <div class="summary-cell">
       <div class="summary-label">Days tracked</div>
       <div class="summary-value">{graded_dates}</div>
@@ -387,6 +419,19 @@ header {{
 }}
 .pick-matchup .fav {{ color: var(--accent); }}
 .pick-matchup .vs {{ color: var(--ink-faint); font-weight: 400; }}
+
+.roi-badge {{
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+  margin-bottom: 7px;
+}}
+.roi-badge.recommended {{ background: var(--accent-soft); color: var(--accent); }}
+.roi-badge.not-recommended {{ background: var(--pending-soft); color: var(--ink-faint); }}
 
 .pick-meta {{
   display: flex;

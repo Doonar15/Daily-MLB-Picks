@@ -78,6 +78,8 @@ Usage:
   python -m mlb_predictor.predictor --no-tune                 # skip auto-tuning, use fixed default weights
   python -m mlb_predictor.predictor --tune-window 14           # tune against the trailing 14 days instead of 30
   python -m mlb_predictor.predictor --backtest 2026-07-01 2026-07-31   # backtest a date range (fixed weights)
+  python -m mlb_predictor.predictor --skill-trend                       # rolling Brier score across the season -- is current skill new or chronic?
+  python -m mlb_predictor.predictor --no-tune-smoothing                # disable EMA damping of the daily auto-tune (on by default)
   python -m mlb_predictor.predictor --grade-picks              # grade saved predictions, show track record, update the HTML ledger
   python -m mlb_predictor.predictor --report                     # regenerate the HTML ledger without grading first
   python -m mlb_predictor.predictor --no-record                 # predict without saving to the history log
@@ -104,11 +106,13 @@ except ImportError:
     print("Install it with: pip install requests --break-system-packages")
     sys.exit(1)
 
-from . import api, backtest, cache, calibration, history, report, statcast
+from . import api, backtest, cache, calibration, history, live_odds, report, statcast, tuning_log
 from .model import DEFAULT_WEIGHTS, MIN_H2H_GAMES, implied_prob_from_moneyline, moneyline_from_prob, predict_game
+from .unit_roi_backtest import expected_value, stake as unit_stake
 
 TUNE_WINDOW_DAYS = 30
 TUNING_CACHE_TTL = 4 * 60 * 60  # rebuild the tuning dataset at most every 4 hours
+TUNE_SMOOTHING_ALPHA = 0.35  # weight given to today's raw tune when --tune-smoothing is on; see backtest.blend_weights
 
 SCOREBOARD_REFRESH_SECONDS = 30
 # Safety valve: a postponed/suspended game's live feed can report "Scheduled"
@@ -122,7 +126,8 @@ SCOREBOARD_MAX_RUNTIME_SECONDS = 7 * 60 * 60
 def get_tuned_weights(as_of_date: str, window_days: int, use_bullpen: bool, use_lineups: bool,
                        use_park_factors: bool, use_handedness: bool, use_rest: bool, use_statcast: bool,
                        use_defense: bool, use_bullpen_availability: bool, use_travel: bool, use_h2h: bool,
-                       use_home_road_splits: bool):
+                       use_home_road_splits: bool, tune_smoothing: bool = True,
+                       smoothing_alpha: float = TUNE_SMOOTHING_ALPHA):
     """Backtest the trailing `window_days` days ending the day before
     as_of_date and search for weights that minimize Brier score over that
     window. The assembled dataset (not just the result) is disk-cached so
@@ -131,6 +136,13 @@ def get_tuned_weights(as_of_date: str, window_days: int, use_bullpen: bool, use_
     Note: weather isn't included in tuning -- forecasts aren't available for
     past dates, so the tuning window's park factors are always the static
     (non-wind-amplified) values regardless of --weather.
+
+    If tune_smoothing is set, the freshly-tuned weights are exponentially
+    blended against the last logged smoothed value (see backtest.blend_weights)
+    before being returned/used for predictions, so a single noisy window can't
+    swing live weights by itself the way h2h_weight/travel_weight roughly
+    halved overnight between the Aug 13 and Aug 14 tuning runs. The raw
+    (unsmoothed) result is still logged alongside the smoothed one either way.
     """
     end = date.fromisoformat(as_of_date) - timedelta(days=1)
     start = end - timedelta(days=window_days - 1)
@@ -156,7 +168,32 @@ def get_tuned_weights(as_of_date: str, window_days: int, use_bullpen: bool, use_
     baseline_score = backtest.evaluate_weights(dataset, DEFAULT_WEIGHTS)
     weights, score = backtest.tune_weights(dataset, DEFAULT_WEIGHTS)
     backtest.print_tuning_summary(weights, score, baseline_score, len(dataset))
-    return weights
+
+    effective_weights = weights
+    if tune_smoothing:
+        previous = tuning_log.get_smoothed_weights_before(as_of_date)
+        if previous is not None:
+            effective_weights = backtest.blend_weights(weights, previous, smoothing_alpha)
+            backtest.print_smoothing_summary(weights, effective_weights, smoothing_alpha)
+        else:
+            print("(--tune-smoothing: no prior logged weights yet -- using this run's raw tuned weights unchanged.)\n")
+
+    tuning_log.upsert({
+        "as_of_date": as_of_date,
+        "window_start": start_str,
+        "window_end": end_str,
+        "window_days": window_days,
+        "n_games": len(dataset),
+        "baseline_brier": baseline_score,
+        "tuned_brier": score,
+        "raw_tuned_weights": tuning_log.weights_to_dict(weights),
+        "smoothed_weights": tuning_log.weights_to_dict(effective_weights),
+        "smoothing_enabled": tune_smoothing,
+        "smoothing_alpha": smoothing_alpha if tune_smoothing else None,
+        "tuned_at": datetime.now().isoformat(timespec="seconds"),
+    })
+
+    return effective_weights
 
 
 def print_prediction(pred, ask_odds=False):
@@ -262,7 +299,38 @@ def print_prediction(pred, ask_odds=False):
     print()
 
 
-def print_top_picks(preds, min_confidence=calibration.MIN_PICK_CONFIDENCE):
+def _pick_decision(prob, favorite, pred, live_odds_map):
+    """Decide whether a Top Pick is RECOMMENDED, preferring real expected
+    value against today's live market odds when both a market line and
+    calibration data are available, falling back to the static
+    ROI_PICK_CONFIDENCE bar otherwise.
+
+    Returns a dict: recommended (bool), method ("ev" or "static"),
+    adjusted/adj_n (calibration.get_adjusted_confidence's output for prob),
+    and, when method == "ev": market_ml and ev_roi (expected profit / risk
+    at that price).
+    """
+    adjusted, adj_n = calibration.get_adjusted_confidence(prob)
+
+    line = live_odds_map.get((pred["home_team"], pred["away_team"])) if live_odds_map else None
+    if line is not None and adj_n > 0:
+        home_ml, away_ml = line
+        market_ml = home_ml if favorite == pred["home_team"] else away_ml
+        risk = unit_stake(market_ml, 1.0)
+        ev = expected_value(adjusted, market_ml, unit_size=1.0)
+        ev_roi = ev / risk if risk else 0.0
+        return {
+            "recommended": ev_roi >= calibration.EV_ROI_MARGIN, "method": "ev",
+            "adjusted": adjusted, "adj_n": adj_n, "market_ml": market_ml, "ev_roi": ev_roi,
+        }
+
+    return {
+        "recommended": prob >= calibration.ROI_PICK_CONFIDENCE, "method": "static",
+        "adjusted": adjusted, "adj_n": adj_n,
+    }
+
+
+def print_top_picks(preds, min_confidence=calibration.MIN_PICK_CONFIDENCE, live_odds_map=None):
     """Rank all of the day's games by the model's RAW confidence in its
     favored side and print every game at or above min_confidence -- not a
     fixed count. The threshold is intentionally applied to raw confidence,
@@ -277,7 +345,19 @@ def print_top_picks(preds, min_confidence=calibration.MIN_PICK_CONFIDENCE):
     currently have enough sample size to adjust; others pass through
     unchanged with n=0.
 
-    Returns the set of game_pks that made the cut, so callers can tag them
+    Split into two sections rather than one flat list, so clearing
+    min_confidence never reads as "the suggestion" by itself: only games
+    _pick_decision marks RECOMMENDED print under "RECOMMENDED PICKS" --
+    preferring real expected value against live_odds_map (today's actual
+    market prices, see live_odds.fetch_live_odds) over the static
+    ROI_PICK_CONFIDENCE bar whenever both a market line and calibration data
+    are available for that game; falls back to the static bar otherwise
+    (no live_odds_map, no market match, or that confidence bucket has no
+    calibration data yet). Everything else that still clears min_confidence
+    prints under a separate, explicitly-labeled "NOT recommended" section --
+    visible for transparency, but never presented as a suggestion.
+
+    Returns (top_pick_game_pks, roi_pick_game_pks) so callers can tag both
     when recording prediction history.
     """
     ranked = []
@@ -292,28 +372,52 @@ def print_top_picks(preds, min_confidence=calibration.MIN_PICK_CONFIDENCE):
 
     ranked.sort(key=lambda x: x[0], reverse=True)
     top = [r for r in ranked if r[0] >= min_confidence]
+    decisions = {id(pred): _pick_decision(prob, favorite, pred, live_odds_map) for prob, favorite, _, pred in top}
+    recommended = [r for r in top if decisions[id(r[3])]["recommended"]]
+    other = [r for r in top if not decisions[id(r[3])]["recommended"]]
+
+    def _print_pick_lines(rows):
+        for i, (prob, favorite, underdog, pred) in enumerate(rows, start=1):
+            ml = moneyline_from_prob(prob)
+            ml_str = f"{ml:+d}" if ml is not None else "N/A"
+            d = decisions[id(pred)]
+            adj_str = f"{d['adjusted']*100:5.1f}%" if d["adj_n"] > 0 else "  N/A "
+
+            print(f"  {i}. {favorite} to beat {underdog}")
+            print(f"     raw {prob*100:5.1f}%   adj {adj_str}   fair ML {ml_str:>6}")
+            if d["method"] == "ev":
+                market_str = f"{d['market_ml']:+d}" if isinstance(d["market_ml"], int) else f"{d['market_ml']:+.0f}"
+                print(f"     market ML {market_str:>6}   expected ROI {d['ev_roi']*100:+.1f}%  (live odds)")
+            else:
+                print("     (static rule -- no live odds match or calibration data for this game)")
+            if i < len(rows):
+                print()
 
     print("#" * 70)
-    print(f"TOP PICKS OF THE DAY  (raw confidence >= {min_confidence*100:.0f}%)")
+    print("RECOMMENDED PICKS  (real expected value vs. live odds when available, "
+          f"else raw confidence >= {calibration.ROI_PICK_CONFIDENCE*100:.0f}%)")
     print("#" * 70)
     if not top:
-        print(f"  No games reached the {min_confidence*100:.0f}% confidence floor today.")
+        print(f"  No games reached the {min_confidence*100:.0f}% confidence floor today -- no picks at all.")
         print()
-        return set()
+    elif not recommended:
+        print("  No games cleared the recommendation bar today -- no recommended picks.")
+        print()
+    else:
+        _print_pick_lines(recommended)
+        print()
 
-    for i, (prob, favorite, underdog, pred) in enumerate(top, start=1):
-        ml = moneyline_from_prob(prob)
-        ml_str = f"{ml:+d}" if ml is not None else "N/A"
-        adjusted, adj_n = calibration.get_adjusted_confidence(prob)
-        adj_str = f"{adjusted*100:5.1f}%" if adj_n > 0 else "  N/A "
+    if other:
+        print("#" * 70)
+        print(f"OTHER TOP PICKS  (>= {min_confidence*100:.0f}% raw confidence, NOT recommended -- "
+              "no real or backtested edge found)")
+        print("#" * 70)
+        _print_pick_lines(other)
+        print()
 
-        print(f"  {i}. {favorite} to beat {underdog}")
-        print(f"     raw {prob*100:5.1f}%   adj {adj_str}   fair ML {ml_str:>6}")
-        if i < len(top):
-            print()
-    print()
-
-    return {pred["game_pk"] for _, _, _, pred in top}
+    top_pick_game_pks = {pred["game_pk"] for _, _, _, pred in top}
+    roi_pick_game_pks = {pred["game_pk"] for _, _, _, pred in recommended}
+    return top_pick_game_pks, roi_pick_game_pks
 
 
 def _ordinal(n):
@@ -497,10 +601,29 @@ def main():
                               f"(default: {calibration.MIN_PICK_CONFIDENCE*100:.0f}, set from real calibration data -- see README)")
     parser.add_argument("--backtest", nargs=2, metavar=("START_DATE", "END_DATE"),
                          help="Backtest the model over a historical date range instead of predicting a single day")
+    parser.add_argument("--skill-trend", action="store_true",
+                         help="Print a rolling trailing-window Brier score report across the season (is current "
+                              "skill new or chronic?), instead of predicting a day. Slow: one dataset fetch per window.")
+    parser.add_argument("--skill-trend-start", type=str, default=None, metavar="START_DATE",
+                         help="First window's start date for --skill-trend (default: March 1 of the current year)")
+    parser.add_argument("--skill-trend-step", type=int, default=14, metavar="DAYS",
+                         help="Days between successive windows for --skill-trend (default: 14)")
     parser.add_argument("--no-tune", action="store_true",
                          help="Skip auto-tuning and use the model's fixed default weights")
     parser.add_argument("--tune-window", type=int, default=TUNE_WINDOW_DAYS,
                          help=f"Days of trailing history to auto-tune against (default: {TUNE_WINDOW_DAYS})")
+    parser.add_argument("--no-tune-smoothing", dest="tune_smoothing", action="store_false",
+                         help="Disable exponential smoothing of the daily auto-tune (on by default as of 2026-08-15, "
+                              "validated over a 15-day out-of-sample check: aggregate Brier +0.0008 vs. raw, "
+                              "day-over-day weight volatility -63.8%%). Each day's freshly-tuned weights are normally "
+                              "blended against the last logged smoothed weights in mlb_predictor/.history/tuning_log.jsonl "
+                              "instead of used unchanged, damping overnight swings from one noisy tuning window (see "
+                              "backtest.blend_weights and --tune-smoothing-alpha). No effect the first time it's ever "
+                              "run (no prior logged weights to smooth against).")
+    parser.set_defaults(tune_smoothing=True)
+    parser.add_argument("--tune-smoothing-alpha", type=float, default=TUNE_SMOOTHING_ALPHA, metavar="ALPHA",
+                         help=f"Weight (0-1) given to today's raw tuned weights when --tune-smoothing is on; lower "
+                              f"damps noise more but responds slower to a real regime shift (default: {TUNE_SMOOTHING_ALPHA})")
     parser.add_argument("--clear-cache", action="store_true",
                          help="Clear the local API response cache and exit")
     parser.add_argument("--grade-picks", action="store_true",
@@ -512,6 +635,9 @@ def main():
                               f"{SCOREBOARD_REFRESH_SECONDS}s until all are Final, instead of predicting a day. Uses --date to pick the day (default: today).")
     parser.add_argument("--no-record", action="store_true",
                          help="Don't save this run's predictions to the history log")
+    parser.add_argument("--no-live-odds", action="store_true",
+                         help="Skip fetching live market odds (ODDS_API_KEY env var) for RECOMMENDED-pick expected "
+                              "value -- falls back to the static confidence bar. Also skips the 1-credit API call.")
     parser.add_argument("--backfill-history", nargs="?", const="DEFAULT", default=None, metavar="START_DATE",
                          help=f"One-time bulk historical pull for confidence calibration (default: ~{calibration.DEFAULT_BACKFILL_START_DAYS_AGO} days back). "
                               "Passing an earlier date goes back further but takes longer and hasn't been validated beyond a few months in one call -- "
@@ -610,6 +736,18 @@ def main():
         backtest.print_backtest_report(start_date, end_date, results)
         return
 
+    if args.skill_trend:
+        start = args.skill_trend_start or f"{date.today().year}-03-01"
+        end = (date.today() - timedelta(days=1)).isoformat()
+        print(f"\nRunning skill trend from {start} to {end} "
+              f"(window={args.tune_window}d, step={args.skill_trend_step}d)...\n")
+        rows = backtest.skill_trend(
+            start, end, window_days=args.tune_window, step_days=args.skill_trend_step,
+            **calibration.CALIBRATION_FLAGS,
+        )
+        backtest.print_skill_trend_report(rows)
+        return
+
     if not args.no_calibration_update and calibration.get_watermark() is not None:
         calibration.top_up()  # normally a same-day no-op or a single-day catch-up; silent, fast
 
@@ -630,6 +768,7 @@ def main():
             args.date, args.tune_window, args.bullpen, args.lineups,
             args.park_factors, args.handedness, args.rest, args.statcast,
             args.defense, args.bullpen_availability, args.travel, args.h2h, args.home_road_splits,
+            tune_smoothing=args.tune_smoothing, smoothing_alpha=args.tune_smoothing_alpha,
         )
 
     season = int(args.date[:4])
@@ -650,10 +789,21 @@ def main():
             print(f"Could not fetch data for {g['away_team']} @ {g['home_team']}: {e}")
 
     if preds:
+        live_odds_map = None
+        if not args.no_live_odds:
+            live_odds_map = live_odds.fetch_live_odds(target_date=args.date)
+            if live_odds_map is None:
+                print("Live odds unavailable (no ODDS_API_KEY set, or the request failed) -- "
+                      "recommendations fall back to the static confidence bar.")
+            else:
+                print(f"Live odds: {len(live_odds_map)} game(s) matched a market line.")
+            print()
+
         min_confidence = (args.min_confidence / 100.0) if args.min_confidence is not None else calibration.MIN_PICK_CONFIDENCE
-        top_pick_game_pks = print_top_picks(preds, min_confidence=min_confidence)
+        top_pick_game_pks, roi_pick_game_pks = print_top_picks(preds, min_confidence=min_confidence,
+                                                                live_odds_map=live_odds_map)
         if not args.no_record:
-            history.record_predictions(args.date, preds, top_pick_game_pks)
+            history.record_predictions(args.date, preds, top_pick_game_pks, roi_pick_game_pks)
 
 
 if __name__ == "__main__":
