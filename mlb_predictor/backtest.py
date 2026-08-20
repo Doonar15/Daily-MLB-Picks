@@ -76,7 +76,15 @@ def _iter_completed_games(start_date: str, end_date: str):
 def run_backtest(start_date: str, end_date: str, use_bullpen=False, use_lineups=False,
                   use_park_factors=False, use_handedness=False, use_rest=False, use_statcast=False,
                   use_defense=False, use_bullpen_availability=False, use_travel=False, use_h2h=False,
-                  use_home_road_splits=False, weights: Weights = DEFAULT_WEIGHTS):
+                  use_home_road_splits=False, weights: Weights = DEFAULT_WEIGHTS, market_odds=None):
+    """market_odds, if given, is a {(home_team, away_team): (home_ml, away_ml)}
+    lookup passed straight through to predict_game -- lets a backtest/
+    calibration-backfill run reflect model.Weights.market_blend_weight for
+    the (typically narrow) date range a historical odds file actually
+    covers. Defaults to None (no market blend) so plain --backtest runs and
+    the default calibration backfill range keep behaving exactly as before
+    unless a caller explicitly supplies odds for a range known to have them.
+    """
     def _predict_one(day_str, season, g):
         try:
             pred = predict_game(
@@ -84,7 +92,7 @@ def run_backtest(start_date: str, end_date: str, use_bullpen=False, use_lineups=
                 use_park_factors=use_park_factors, use_handedness=use_handedness, use_rest=use_rest,
                 use_statcast=use_statcast, use_defense=use_defense,
                 use_bullpen_availability=use_bullpen_availability, use_travel=use_travel, use_h2h=use_h2h,
-                use_home_road_splits=use_home_road_splits, weights=weights,
+                use_home_road_splits=use_home_road_splits, weights=weights, market_odds=market_odds,
             )
         except Exception:
             return None
@@ -237,7 +245,7 @@ _TUNABLE_FIELDS = [
     "pitcher_weight", "bullpen_weight", "lineup_weight",
     "handedness_weight", "rest_weight", "statcast_blend_weight",
     "defense_weight", "bullpen_availability_weight", "travel_weight",
-    "h2h_weight", "home_road_split_weight",
+    "h2h_weight", "home_road_split_weight", "shrinkage_factor", "sample_shrinkage_games",
 ]
 
 # Absolute bounds per field, so a run of "improving" multiplier steps can't
@@ -258,6 +266,19 @@ _FIELD_BOUNDS = {
     "travel_weight": (0.0, 0.05),
     "h2h_weight": (0.0, 0.30),
     "home_road_split_weight": (0.0, 0.40),
+    # Floor well above 0.0: a shrinkage_factor of 0 always predicts a coin
+    # flip (Brier exactly 0.2500, the trivial baseline), so an unbounded
+    # search on a noisy/small tuning window could otherwise "win" by erasing
+    # all signal rather than genuinely compressing overconfidence.
+    "shrinkage_factor": (0.15, 1.0),
+    # Full-dataset sweep found K=10-15 minimized Brier overall (K past ~40
+    # started giving back the gain by over-shrinking large, reliable
+    # late-season samples) while the early-season-only slice kept improving
+    # all the way to K=100 -- a single fixed value has to compromise across
+    # very different sample sizes. Bounded well above that overall optimum
+    # so the daily tuner can't drift into the region that only helps a
+    # small early-season slice at the cost of everything else.
+    "sample_shrinkage_games": (0.0, 40.0),
 }
 
 

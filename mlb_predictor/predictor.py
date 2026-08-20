@@ -107,8 +107,10 @@ except ImportError:
     sys.exit(1)
 
 from . import api, backtest, cache, calibration, history, live_odds, report, statcast, tuning_log
-from .model import DEFAULT_WEIGHTS, MIN_H2H_GAMES, implied_prob_from_moneyline, moneyline_from_prob, predict_game
-from .unit_roi_backtest import expected_value, stake as unit_stake
+from .model import (
+    DEFAULT_WEIGHTS, MIN_H2H_GAMES, devig_home_prob, implied_prob_from_moneyline,
+    moneyline_from_prob, predict_game,
+)
 
 TUNE_WINDOW_DAYS = 30
 TUNING_CACHE_TTL = 4 * 60 * 60  # rebuild the tuning dataset at most every 4 hours
@@ -299,66 +301,59 @@ def print_prediction(pred, ask_odds=False):
     print()
 
 
-def _pick_decision(prob, favorite, pred, live_odds_map):
-    """Decide whether a Top Pick is RECOMMENDED, preferring real expected
-    value against today's live market odds when both a market line and
-    calibration data are available, falling back to the static
-    ROI_PICK_CONFIDENCE bar otherwise.
+def _market_favorite_pick(pred, live_odds_map):
+    """The validated RECOMMENDED-pick rule (see calibration.ROI_PICK_FAVORITE_PRICE_CAP
+    for the full backing: 189 picks, +15.2% ROI, bootstrap-confirmed) --
+    pick whichever side the MARKET's own devigged probability favors, not
+    the model's, and recommend it unless that side is a heavily-juiced
+    favorite. The model's own prediction plays no role in this decision.
 
-    Returns a dict: recommended (bool), method ("ev" or "static"),
-    adjusted/adj_n (calibration.get_adjusted_confidence's output for prob),
-    and, when method == "ev": market_ml and ev_roi (expected profit / risk
-    at that price).
+    Returns None if there's no live-odds match for this game. Otherwise a
+    dict: side ("home"/"away"), team (that side's name), ml (that side's
+    market price), recommended (bool).
     """
-    adjusted, adj_n = calibration.get_adjusted_confidence(prob)
-
     line = live_odds_map.get((pred["home_team"], pred["away_team"])) if live_odds_map else None
-    if line is not None and adj_n > 0:
-        home_ml, away_ml = line
-        market_ml = home_ml if favorite == pred["home_team"] else away_ml
-        risk = unit_stake(market_ml, 1.0)
-        ev = expected_value(adjusted, market_ml, unit_size=1.0)
-        ev_roi = ev / risk if risk else 0.0
-        return {
-            "recommended": ev_roi >= calibration.EV_ROI_MARGIN, "method": "ev",
-            "adjusted": adjusted, "adj_n": adj_n, "market_ml": market_ml, "ev_roi": ev_roi,
-        }
+    if line is None:
+        return None
+    home_ml, away_ml = line
+    market_home_prob = devig_home_prob(home_ml, away_ml)
+    if market_home_prob is None:
+        return None
 
-    return {
-        "recommended": prob >= calibration.ROI_PICK_CONFIDENCE, "method": "static",
-        "adjusted": adjusted, "adj_n": adj_n,
-    }
+    if market_home_prob >= 0.5:
+        side, team, ml = "home", pred["home_team"], home_ml
+    else:
+        side, team, ml = "away", pred["away_team"], away_ml
+
+    is_juiced_favorite = ml < 0 and abs(ml) > calibration.ROI_PICK_FAVORITE_PRICE_CAP
+    return {"side": side, "team": team, "ml": ml, "recommended": not is_juiced_favorite}
 
 
 def print_top_picks(preds, min_confidence=calibration.MIN_PICK_CONFIDENCE, live_odds_map=None):
-    """Rank all of the day's games by the model's RAW confidence in its
-    favored side and print every game at or above min_confidence -- not a
-    fixed count. The threshold is intentionally applied to raw confidence,
-    not the calibration-adjusted number: a 66% raw pick might have an
-    adjusted confidence below the floor, and that gap is exactly what's
-    worth showing, not filtering out before it's seen.
+    """Two independent things, printed as two independent sections -- they
+    no longer gate each other the way they used to:
 
-    Each pick shows both the raw (model-stated) confidence and the
-    calibration-adjusted confidence (what that raw confidence level has
-    actually meant historically, per calibration.get_adjusted_confidence) --
-    see calibration.py's ADJUSTMENT_BUCKETS for which confidence ranges
-    currently have enough sample size to adjust; others pass through
-    unchanged with n=0.
+    1. RECOMMENDED PICKS: every game (not just Top Picks -- ALL of today's
+       scheduled games) where _market_favorite_pick finds a live line and
+       recommends it. This scans independently of the model's own opinion,
+       by design (see _market_favorite_pick's docstring) -- a game the model
+       wouldn't even call a Top Pick, or where the model favors the other
+       side entirely, can still show up here if the market's own favorite is
+       cheap enough.
+    2. TOP PICKS: every game at or above min_confidence in the model's own
+       RAW confidence (post-shrinkage, post-market-blend -- see
+       model.Weights), ranked highest first, for transparency into what the
+       model itself thinks. Shown alongside its calibration-adjusted number
+       (calibration.get_adjusted_confidence) but purely informational now --
+       it does not drive any recommendation.
 
-    Split into two sections rather than one flat list, so clearing
-    min_confidence never reads as "the suggestion" by itself: only games
-    _pick_decision marks RECOMMENDED print under "RECOMMENDED PICKS" --
-    preferring real expected value against live_odds_map (today's actual
-    market prices, see live_odds.fetch_live_odds) over the static
-    ROI_PICK_CONFIDENCE bar whenever both a market line and calibration data
-    are available for that game; falls back to the static bar otherwise
-    (no live_odds_map, no market match, or that confidence bucket has no
-    calibration data yet). Everything else that still clears min_confidence
-    prints under a separate, explicitly-labeled "NOT recommended" section --
-    visible for transparency, but never presented as a suggestion.
-
-    Returns (top_pick_game_pks, roi_pick_game_pks) so callers can tag both
-    when recording prediction history.
+    Returns (top_pick_game_pks, roi_pick_game_pks, market_ml_by_game_pk,
+    roi_pick_side_by_game_pk) so callers can tag/record all of the above.
+    market_ml_by_game_pk holds the RECOMMENDED side's own market price for
+    ROI picks (falls back to the model-favored side's price for plain Top
+    Picks, for the informational "ML" display); roi_pick_side_by_game_pk
+    holds the actual team name recommended, which can differ from the
+    model's own predicted_winner -- see history.py's roi_pick_side field.
     """
     ranked = []
     for pred in preds:
@@ -369,55 +364,74 @@ def print_top_picks(preds, min_confidence=calibration.MIN_PICK_CONFIDENCE, live_
             favorite, prob = pred["away_team"], pred["away_win_prob"]
             underdog = pred["home_team"]
         ranked.append((prob, favorite, underdog, pred))
-
     ranked.sort(key=lambda x: x[0], reverse=True)
     top = [r for r in ranked if r[0] >= min_confidence]
-    decisions = {id(pred): _pick_decision(prob, favorite, pred, live_odds_map) for prob, favorite, _, pred in top}
-    recommended = [r for r in top if decisions[id(r[3])]["recommended"]]
-    other = [r for r in top if not decisions[id(r[3])]["recommended"]]
 
-    def _print_pick_lines(rows):
-        for i, (prob, favorite, underdog, pred) in enumerate(rows, start=1):
-            ml = moneyline_from_prob(prob)
-            ml_str = f"{ml:+d}" if ml is not None else "N/A"
-            d = decisions[id(pred)]
-            adj_str = f"{d['adjusted']*100:5.1f}%" if d["adj_n"] > 0 else "  N/A "
-
-            print(f"  {i}. {favorite} to beat {underdog}")
-            print(f"     raw {prob*100:5.1f}%   adj {adj_str}   fair ML {ml_str:>6}")
-            if d["method"] == "ev":
-                market_str = f"{d['market_ml']:+d}" if isinstance(d["market_ml"], int) else f"{d['market_ml']:+.0f}"
-                print(f"     market ML {market_str:>6}   expected ROI {d['ev_roi']*100:+.1f}%  (live odds)")
-            else:
-                print("     (static rule -- no live odds match or calibration data for this game)")
-            if i < len(rows):
-                print()
+    market_picks = {}
+    for pred in preds:
+        decision = _market_favorite_pick(pred, live_odds_map)
+        if decision is not None:
+            market_picks[pred["game_pk"]] = decision
+    recommended_preds = [p for p in preds if market_picks.get(p["game_pk"], {}).get("recommended")]
 
     print("#" * 70)
-    print("RECOMMENDED PICKS  (real expected value vs. live odds when available, "
-          f"else raw confidence >= {calibration.ROI_PICK_CONFIDENCE*100:.0f}%)")
+    print(f"RECOMMENDED PICKS  (market's own favorite, priced -{calibration.ROI_PICK_FAVORITE_PRICE_CAP} or better)")
     print("#" * 70)
-    if not top:
-        print(f"  No games reached the {min_confidence*100:.0f}% confidence floor today -- no picks at all.")
+    if not live_odds_map:
+        print("  No live odds available today -- this rule needs a real market price for every game.")
         print()
-    elif not recommended:
+    elif not recommended_preds:
         print("  No games cleared the recommendation bar today -- no recommended picks.")
         print()
     else:
-        _print_pick_lines(recommended)
+        for i, pred in enumerate(recommended_preds, start=1):
+            d = market_picks[pred["game_pk"]]
+            underdog = pred["away_team"] if d["team"] == pred["home_team"] else pred["home_team"]
+            print(f"  {i}. {d['team']} to beat {underdog}")
+            print(f"     market ML {d['ml']:+d}  (live odds)")
+            if i < len(recommended_preds):
+                print()
         print()
 
-    if other:
-        print("#" * 70)
-        print(f"OTHER TOP PICKS  (>= {min_confidence*100:.0f}% raw confidence, NOT recommended -- "
-              "no real or backtested edge found)")
-        print("#" * 70)
-        _print_pick_lines(other)
+    print("#" * 70)
+    print(f"TOP PICKS  (>= {min_confidence*100:.0f}% raw model confidence -- informational, "
+          "not a recommendation)")
+    print("#" * 70)
+    if not top:
+        print(f"  No games reached the {min_confidence*100:.0f}% confidence floor today.")
+        print()
+    else:
+        for i, (prob, favorite, underdog, pred) in enumerate(top, start=1):
+            ml = moneyline_from_prob(prob)
+            ml_str = f"{ml:+d}" if ml is not None else "N/A"
+            adjusted, adj_n = calibration.get_adjusted_confidence(prob)
+            adj_str = f"{adjusted*100:5.1f}%" if adj_n > 0 else "  N/A "
+            print(f"  {i}. {favorite} to beat {underdog}")
+            print(f"     raw {prob*100:5.1f}%   adj {adj_str}   fair ML {ml_str:>6}")
+            if i < len(top):
+                print()
         print()
 
     top_pick_game_pks = {pred["game_pk"] for _, _, _, pred in top}
-    roi_pick_game_pks = {pred["game_pk"] for _, _, _, pred in recommended}
-    return top_pick_game_pks, roi_pick_game_pks
+    roi_pick_game_pks = {pred["game_pk"] for pred in recommended_preds}
+
+    top_favorite_by_game_pk = {pred["game_pk"]: favorite for _, favorite, _, pred in top}
+    market_ml_by_game_pk = {}
+    roi_pick_side_by_game_pk = {}
+    for pred in preds:
+        game_pk = pred["game_pk"]
+        decision = market_picks.get(game_pk)
+        if game_pk in roi_pick_game_pks:
+            market_ml_by_game_pk[game_pk] = decision["ml"]
+            roi_pick_side_by_game_pk[game_pk] = decision["team"]
+        elif game_pk in top_pick_game_pks:
+            line = live_odds_map.get((pred["home_team"], pred["away_team"])) if live_odds_map else None
+            favorite = top_favorite_by_game_pk[game_pk]
+            market_ml_by_game_pk[game_pk] = (
+                (line[0] if favorite == pred["home_team"] else line[1]) if line is not None else None
+            )
+
+    return top_pick_game_pks, roi_pick_game_pks, market_ml_by_game_pk, roi_pick_side_by_game_pk
 
 
 def _ordinal(n):
@@ -771,6 +785,17 @@ def main():
             tune_smoothing=args.tune_smoothing, smoothing_alpha=args.tune_smoothing_alpha,
         )
 
+    live_odds_map = None
+    if not args.no_live_odds:
+        live_odds_map = live_odds.fetch_live_odds(target_date=args.date)
+        if live_odds_map is None:
+            print("Live odds unavailable (no ODDS_API_KEY set, or the request failed) -- "
+                  "predictions won't include the market blend, and recommendations fall back "
+                  "to the static confidence bar.")
+        else:
+            print(f"Live odds: {len(live_odds_map)} game(s) matched a market line.")
+        print()
+
     season = int(args.date[:4])
     preds = []
     for g in games:
@@ -781,7 +806,7 @@ def main():
                 use_rest=args.rest, use_weather=use_weather, use_statcast=args.statcast,
                 use_defense=args.defense, use_bullpen_availability=args.bullpen_availability,
                 use_travel=args.travel, use_h2h=args.h2h, use_home_road_splits=args.home_road_splits,
-                weights=weights,
+                weights=weights, market_odds=live_odds_map,
             )
             print_prediction(pred, ask_odds=args.odds)
             preds.append(pred)
@@ -789,21 +814,12 @@ def main():
             print(f"Could not fetch data for {g['away_team']} @ {g['home_team']}: {e}")
 
     if preds:
-        live_odds_map = None
-        if not args.no_live_odds:
-            live_odds_map = live_odds.fetch_live_odds(target_date=args.date)
-            if live_odds_map is None:
-                print("Live odds unavailable (no ODDS_API_KEY set, or the request failed) -- "
-                      "recommendations fall back to the static confidence bar.")
-            else:
-                print(f"Live odds: {len(live_odds_map)} game(s) matched a market line.")
-            print()
-
         min_confidence = (args.min_confidence / 100.0) if args.min_confidence is not None else calibration.MIN_PICK_CONFIDENCE
-        top_pick_game_pks, roi_pick_game_pks = print_top_picks(preds, min_confidence=min_confidence,
-                                                                live_odds_map=live_odds_map)
+        top_pick_game_pks, roi_pick_game_pks, market_ml_by_game_pk, roi_pick_side_by_game_pk = print_top_picks(
+            preds, min_confidence=min_confidence, live_odds_map=live_odds_map)
         if not args.no_record:
-            history.record_predictions(args.date, preds, top_pick_game_pks, roi_pick_game_pks)
+            history.record_predictions(args.date, preds, top_pick_game_pks, roi_pick_game_pks,
+                                        market_ml_by_game_pk, roi_pick_side_by_game_pk)
 
 
 if __name__ == "__main__":

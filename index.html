@@ -237,21 +237,6 @@ header {
   font-size: 12.5px;
 }
 
-footer {
-  margin-top: 36px;
-  padding-top: 16px;
-  border-top: 1px solid var(--rule);
-  font-size: 12px;
-  color: var(--ink-faint);
-  line-height: 1.6;
-}
-footer code {
-  background: var(--accent-soft);
-  color: var(--accent);
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 11.5px;
-}
 </style>
 </head>
 <body>
@@ -259,7 +244,7 @@ footer code {
 
   <header>
     <div class="masthead">ROI Picks Ledger</div>
-    <div class="date-line">2026-08-19</div>
+    <div class="date-line">2026-08-20</div>
   </header>
 
   <div class="summary-bar">
@@ -271,21 +256,58 @@ footer code {
     <div class="summary-cell">
       <div class="summary-label">Units</div>
       <div class="summary-value accent">-1.00u</div>
-      <div class="summary-sub">-100.0% ROI (1 priced)</div>
+      <div class="summary-sub">-100.0% ROI</div>
     </div>
     <div class="summary-cell">
       <div class="summary-label">Days tracked</div>
       <div class="summary-value">1</div>
-      <div class="summary-sub">2 total, incl. pending</div>
+      <div class="summary-sub">3 total, incl. pending</div>
     </div>
     <div class="summary-cell">
       <div class="summary-label">Picks graded</div>
       <div class="summary-value">1</div>
-      <div class="summary-sub">1 still pending</div>
+      <div class="summary-sub">3 still pending</div>
     </div>
   </div>
 
   
+  <section class="day-section">
+    <div class="day-header">
+      <div class="day-date">Thu Aug 20 2026</div>
+      <div class="day-record">pending</div>
+    </div>
+    <div class="picks">
+      
+    <div class="pick-row">
+      <div class="pick-num">1</div>
+      <div class="pick-main">
+        <div class="pick-matchup"><span class="fav">Chicago White Sox</span> <span class="vs">to beat</span> Atlanta Braves</div>
+        <div class="pick-meta">
+          <span><span class="metric-label">raw</span> <span class="raw-val">53.4%</span></span>
+          <span><span class="metric-label">adj</span> <span class="adjusted-val">52.5%</span></span>
+          <span><span class="metric-label">ML</span> -109</span>
+        </div>
+        <div class="pick-movement">moved during the day: 50.7% &rarr; 50.7% &rarr; 51.2% &rarr; 53.4%</div>
+      </div>
+      <div class="result-pill pending"><span class="dot"></span>Pending</div>
+    </div>
+
+    <div class="pick-row">
+      <div class="pick-num">2</div>
+      <div class="pick-main">
+        <div class="pick-matchup"><span class="fav">New York Yankees</span> <span class="vs">to beat</span> Baltimore Orioles</div>
+        <div class="pick-meta">
+          <span><span class="metric-label">raw</span> <span class="raw-val">52.4%</span></span>
+          <span><span class="metric-label">adj</span> <span class="adjusted-val">52.5%</span></span>
+          <span><span class="metric-label">ML</span> -108</span>
+        </div>
+        <div class="pick-movement">moved during the day: 51.1% &rarr; 50.9% &rarr; 50.8% &rarr; 52.4%</div>
+      </div>
+      <div class="result-pill pending"><span class="dot"></span>Pending</div>
+    </div>
+    </div>
+  </section>
+
   <section class="day-section">
     <div class="day-header">
       <div class="day-date">Wed Aug 19 2026</div>
@@ -299,7 +321,7 @@ footer code {
         <div class="pick-matchup"><span class="fav">Milwaukee Brewers</span> <span class="vs">to beat</span> Seattle Mariners</div>
         <div class="pick-meta">
           <span><span class="metric-label">raw</span> <span class="raw-val">60.7%</span></span>
-          <span><span class="metric-label">adj</span> <span class="adjusted-val">56.6%</span></span>
+          <span><span class="metric-label">adj</span> <span class="adjusted-val">66.8%</span></span>
           <span><span class="metric-label">ML</span> -122</span>
         </div>
         <div class="pick-movement">moved during the day: 60.9% &rarr; 60.7%</div>
@@ -322,7 +344,7 @@ footer code {
         <div class="pick-matchup"><span class="fav">New York Mets</span> <span class="vs">to beat</span> San Diego Padres</div>
         <div class="pick-meta">
           <span><span class="metric-label">raw</span> <span class="raw-val">58.3%</span></span>
-          <span><span class="metric-label">adj</span> <span class="adjusted-val">52.4%</span></span>
+          <span><span class="metric-label">adj</span> <span class="adjusted-val">52.5%</span></span>
           <span><span class="metric-label">ML</span> +104</span>
         </div>
         <div class="pick-movement">moved during the day: 58.1% &rarr; 58.3%</div>
@@ -331,14 +353,6 @@ footer code {
     </div>
     </div>
   </section>
-
-  <footer>
-    Generated from <code>mlb_predictor/.history/predictions.jsonl</code> &mdash; ROI Picks only (real expected-value
-    plays vs. the market, not the broader Top Picks pool). Units assume flat 1-unit risk per pick at the closing
-    moneyline; a pick without a captured market price counts in the record but not in the units total.
-    Pending rows update the next time you run <code>--grade-picks</code> after those games go final.
-    Regenerate this page any time with <code>--grade-picks</code> or <code>--report</code>.
-  </footer>
 
 </div>
 </body>

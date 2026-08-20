@@ -59,6 +59,15 @@ def fetch_live_odds(api_key: str = None, target_date: str = None, timeout: int =
     actually is -- callers fall back to a non-market-dependent rule for
     those specific games instead of risking a wrong-game price.
 
+    Already-started games are excluded entirely, not just date-filtered:
+    once first pitch happens, this same h2h market starts returning IN-PLAY
+    prices instead of a pre-game line (confirmed directly -- a game 30
+    minutes in with the home team already up 3-0 priced at -2000, not a
+    real pre-game number). Every caller here treats the result as a
+    pre-game price, so a mid-game price would silently corrupt whatever
+    it's used for -- the model's probability blend, or the RECOMMENDED-pick
+    decision -- with information the model itself was never given.
+
     Returns None if no API key is configured (api_key not passed and
     ODDS_API_KEY isn't set) or the request fails for any reason (network
     error, bad key, rate limit, malformed response) -- callers should treat
@@ -84,6 +93,7 @@ def fetch_live_odds(api_key: str = None, target_date: str = None, timeout: int =
     except (requests.RequestException, ValueError):
         return None
 
+    now = datetime.now(timezone.utc)
     odds = {}
     seen_twice = set()
     for g in games:
@@ -93,6 +103,17 @@ def fetch_live_odds(api_key: str = None, target_date: str = None, timeout: int =
             continue
         try:
             if _game_date_et(commence_time) != target_date:
+                continue
+            # The live endpoint's docstring warns it returns "upcoming/
+            # in-progress" games -- once a game has actually started, this
+            # same h2h market key starts returning IN-PLAY prices instead
+            # of a pre-game line (confirmed directly: a game 30 minutes in
+            # with the home team already up 3-0 came back priced at -2000,
+            # not a real pre-game number). Every caller of this function
+            # treats its output as a pre-game price -- for model blending,
+            # for the RECOMMENDED-pick decision -- so a started game must be
+            # excluded here, not filtered ad hoc by every caller.
+            if datetime.fromisoformat(commence_time.replace("Z", "+00:00")) <= now:
                 continue
         except ValueError:
             continue

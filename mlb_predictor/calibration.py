@@ -48,16 +48,30 @@ CALIBRATION_FLAGS = dict(
 BUCKET_EDGES = [0.50, 0.60, 0.70, 0.80, 0.90, 1.001]  # 1.001 so 100% sorts into the last bucket
 
 # Minimum raw (model-predicted) confidence for a game to show up in Top
-# Picks. Set from real calibration data: the 50-60% bucket showed only a
-# -1.8pt gap (n=1021) -- close to honest -- while everything from 60% up
-# showed real, larger overconfidence gaps that don't keep shrinking as
-# stated confidence rises (60-70%: -5.8pt n=428, 70-80%: -11.3pt n=95).
-# 58% sits inside the well-calibrated part of the 50-60% band rather than at
-# its noisier low end. Threshold is intentionally on RAW confidence, not the
-# adjusted number -- the whole point of showing both is that a raw 66% pick
-# might turn out to have an adjusted confidence below this floor, and that
-# gap is exactly what's worth seeing, not hiding by thresholding post-adjustment.
-MIN_PICK_CONFIDENCE = 0.58
+# Picks. Re-derived after model.Weights.shrinkage_factor (0.45) was added to
+# compress the final probability toward 50% -- see that field's docstring
+# for why. Shrinkage compressed the whole raw-confidence scale into roughly
+# 50-70% (down from 50-95% before), and largely fixed the overconfidence
+# problem that motivated the original 0.58 floor: an offline sweep over
+# confidence.jsonl (5,976 games, transform applied to the already-recorded
+# pre-shrinkage confidence values, exact since shrinkage is the model's
+# literal last step) showed the 50-55%/55-60%/60-65% shrunk bands all within
+# a few points of honest (the old floor existed specifically because 60%+
+# WASN'T). 55% sits just above the noisiest, least-differentiated part of
+# the scale (50-52%, n=1782, essentially a coin flip) while keeping a broad,
+# still-curated pool (~33% of games clear it) as Top Picks. Threshold is
+# intentionally on RAW (post-shrinkage) confidence, not the adjusted number
+# -- the whole point of showing both is that a raw 66% pick might turn out
+# to have an adjusted confidence below this floor, and that gap is exactly
+# what's worth seeing, not hiding by thresholding post-adjustment.
+# RE-CHECKED after model.Weights.market_blend_weight and sample_shrinkage_games
+# were added on top of shrinkage_factor: rebuilt calibration.jsonl under the
+# full model (2025+2026, 4,448 games, market-blended for the ranges the local
+# odds files cover) and re-ran the bucket breakdown. Still holds -- every
+# 2pt band from 50-65% stayed within a few points of honest (the one outlier,
+# 65-70% at +12.3pts, is n=19, noise). No change needed; 0.55 remains inside
+# the well-calibrated range on the new (slightly narrower, ~50-69%) scale.
+MIN_PICK_CONFIDENCE = 0.55
 
 # Minimum raw confidence for a Top Pick to also count as a backtested ROI
 # pick -- a much narrower, betting-specific bar than MIN_PICK_CONFIDENCE.
@@ -76,18 +90,51 @@ MIN_PICK_CONFIDENCE = 0.58
 # picks vs. 240), so still the leading hypothesis, not a proven edge -- see
 # unit_roi_backtest.py's docstring and its --adjusted-confidence sweep mode
 # for the full methodology.
-ROI_PICK_CONFIDENCE = 0.80
+#
+# RE-DERIVED after model.Weights.shrinkage_factor's addition compressed raw
+# confidence into roughly 50-70%, making the old 0.80 mathematically
+# unreachable. Re-ran the same RAW-confidence sweep (2025+2026 pooled, 4,116
+# games) rather than --adjusted-confidence, since that mode draws its
+# adjustment from calibration.jsonl -- which still reflects the PRE-shrinkage
+# model and would've compared the new model's output against the old model's
+# historical accuracy in the same numeric range, not a clean read. Same
+# pattern as the original 0.75->0.80 story: edge is concentrated in one tier,
+# not "higher is better" -- everything below 62% raw was net negative, then
+# >=62% raw (no favorite cap) turned real: 181 picks, 67.4% hit rate, +5.2%
+# ROI, 86.2% P(profit), 90% CI [-3.0%,+13.2%]. >=65% raw posts a better point
+# estimate (+8.7-9.1% ROI) but on a third the sample (70 picks) -- a
+# reasonable tightening later as more games accumulate, not the first move.
+# See unit_roi_backtest.py's docstring and its --sweep mode for the full
+# methodology.
+#
+# RETIRED as the live RECOMMENDED-pick decision as of ROI_PICK_FAVORITE_PRICE_CAP
+# below: model.Weights.market_blend_weight's own testing found that model-vs-
+# market disagreement (the entire premise this confidence-based bar and
+# EV_ROI_MARGIN/the old EV method depended on) is NOT informative -- hit rate
+# and ROI got worse, not better, as disagreement grew (market_edge.py's edge-
+# bucket backtest). The validated replacement doesn't use the model's opinion
+# for the decision at all. Left defined (not deleted) since unit_roi_backtest.py
+# still references it in its own diagnostic sweep methodology/docstrings.
+ROI_PICK_CONFIDENCE = 0.62
 
-# Minimum expected-ROI (expected profit / risked amount) required for a pick
-# to count as RECOMMENDED when live market odds are available (see
-# live_odds.py / unit_roi_backtest.expected_value). EV is computed from
-# calibration-adjusted confidence against the real market price, so this
-# margin exists purely as a safety buffer for model/calibration error --
-# a razor-thin EV>0% shouldn't be trusted as a real edge. 3% is a starting
-# point roughly in line with the magnitude of edges actually found across
-# this project's backtesting (single digits, not huge); revisit once there's
-# a real-money or paper-tracked EV-pick record to check it against.
-EV_ROI_MARGIN = 0.03
+# The live RECOMMENDED-pick decision as of model.Weights.market_blend_weight
+# (see its docstring in model.py): pick whichever side the MARKET's own
+# devigged probability favors -- not the model's -- and recommend it unless
+# that side is a heavily-juiced (expensive) favorite. No confidence
+# threshold, no model opinion involved; the model's own favored side is
+# irrelevant to this decision (predictor._market_favorite_pick).
+#
+# Validated via unit_roi_backtest.py's sweep methodology on plain raw market
+# probability (2025+2026 pooled, 4,118 games): every cell below this cap was
+# either unprofitable or too small a sample; >=50% confidence (true by
+# construction -- it's whichever side is favored) with favorites priced -110
+# or better turned real: 189 picks, 60.3% hit rate, +15.2% ROI, 2000x
+# bootstrap 90% CI [+4.0%,+26.3%] (never crosses zero), P(profit)=98.6% --
+# the tightest, best-supported edge found across every signal tested this
+# project (see model.py's market_blend_weight docstring for the broader
+# context). A price cap tighter than -110 wasn't sweep-validated as better;
+# loosening it hasn't been tested and shouldn't be assumed safe.
+ROI_PICK_FAVORITE_PRICE_CAP = 110
 
 # Buckets used for Top Picks display/threshold purposes specifically (as
 # opposed to bucket_report's fixed 10-point report buckets above), after a
@@ -166,7 +213,7 @@ def default_backfill_start():
     return (date.today() - timedelta(days=DEFAULT_BACKFILL_START_DAYS_AGO)).isoformat()
 
 
-def backfill(start_date: str = None, end_date: str = None):
+def backfill(start_date: str = None, end_date: str = None, market_odds=None):
     """One-time (or re-run-to-extend) bulk historical pull. Backtests
     start_date (default: ~4 months ago) through end_date (default: yesterday)
     and saves every graded game to the calibration log, then sets the
@@ -174,13 +221,21 @@ def backfill(start_date: str = None, end_date: str = None):
     results aren't deduped against the watermark here, so only call this for
     a genuinely new range (use top_up() for the routine "since last time"
     case).
+
+    market_odds, if given, is passed straight through to run_backtest so the
+    calibration data reflects model.Weights.market_blend_weight for a range
+    a historical odds file actually covers (there's no free historical-odds
+    API to cover an arbitrary range -- see model.py's market_blend_weight
+    docstring). Defaults to None: routine top-ups of the live rolling window
+    have no such file available and fall back to the pure (unblended) model,
+    same as always.
     """
     start_date = start_date or default_backfill_start()
     end_date = end_date or (date.today() - timedelta(days=1)).isoformat()
     if start_date > end_date:
         return 0
 
-    results = backtest.run_backtest(start_date, end_date, **CALIBRATION_FLAGS)
+    results = backtest.run_backtest(start_date, end_date, market_odds=market_odds, **CALIBRATION_FLAGS)
     records = _results_to_records(results)
     _append_all(records)
 

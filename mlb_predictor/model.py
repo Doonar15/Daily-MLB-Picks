@@ -38,6 +38,48 @@ class Weights:
     h2h_cap: float = 0.04
     home_road_split_weight: float = 0.20
     home_road_split_cap: float = 0.04
+    # Compresses the final probability toward 50% (1.0 = no compression, 0.0
+    # = always predict a coin flip): home_prob = 0.5 + shrinkage_factor *
+    # (home_prob - 0.5), applied as the very last step before clipping. The
+    # additive stack above has no cap on how many signals can agree in the
+    # same direction, and confidence.jsonl (5,976 games) showed that stacking
+    # produces real, worsening overconfidence as stated confidence rises --
+    # the 90-100% bucket won at only 55.6%, barely better than a coin flip.
+    # 0.45 minimized Brier score (0.2520 -> 0.2472) in an offline sweep over
+    # that dataset and nearly flattened the 50-90% calibration bands (gaps
+    # shrank from as much as -14.4pts to within ~1-4pts); see MIN_PICK_CONFIDENCE
+    # in calibration.py for the resulting threshold re-derivation.
+    shrinkage_factor: float = 0.45
+    # Blends the (already shrunk) model probability toward the market's own
+    # devigged implied probability, applied as the step after shrinkage:
+    # home_prob = (1-w)*home_prob + w*market_home_prob, only when a market
+    # line is available for this game (inputs["market_home_prob"] is None
+    # otherwise, and this is a no-op). An offline sweep across 4,118 games
+    # (2025+2026 seasons) found Brier score improves monotonically from
+    # w=0 (0.2474) through w=0.9 (0.2435, the minimum) before ticking back up
+    # at w=1.0 (0.2436) -- see market_edge.py's edge-bucket backtest for why:
+    # when the model disagrees with the market, that disagreement was found
+    # NOT to be informative (hit rate/ROI got worse, not better, as the
+    # disagreement grew), so there's little the model adds once the market
+    # has real weight in the blend. 0.8 sits inside that flat, near-optimal
+    # 0.7-0.9 range. NOT included in backtest.py's auto-tuned _TUNABLE_FIELDS:
+    # unlike every other tunable weight, this one needs a real market price
+    # per game, and the daily auto-tuner's rolling trailing window has no
+    # reliable historical-odds source (The Odds API's historical endpoint is
+    # paid-only; the local season odds files this weight was validated
+    # against are static one-time downloads, not a live rolling feed) --
+    # tuning it against a window with mostly-missing market data would tune
+    # against noise, not signal. Fixed at this offline-validated value
+    # instead, same as FIP_CONSTANT/league-average-runs were fixed constants
+    # in the tests that vetted this feature.
+    market_blend_weight: float = 0.8
+    # "Games" worth of league-average prior weight regressed_runs() blends
+    # into a team's season-total runs before anything else (park factor,
+    # Pythagorean, etc.) touches them -- see that function's docstring for
+    # the full validation. Unlike market_blend_weight, this needs no
+    # external data (pure function of runs/games_played, always available),
+    # so it IS included in backtest.py's auto-tuned _TUNABLE_FIELDS.
+    sample_shrinkage_games: float = 10.0
 
 
 DEFAULT_WEIGHTS = Weights()
@@ -137,6 +179,38 @@ def park_adjusted_runs(runs_scored, runs_allowed, games_played, park_run_factor)
     # park effect without double-counting the home park's own contribution.
     game_factor = factor ** 0.5
     return runs_scored * game_factor, runs_allowed * game_factor
+
+
+# Fixed, not point-in-time: computed once from the 2025+2026 backtest dataset
+# (4,301 games) that validated this feature (4.428-4.432 runs/team/game,
+# stable across both seasons independently). Refresh occasionally the same
+# way park factors are noted to (parks.py) -- league-wide scoring rate drifts
+# slowly year to year, not something worth a live API call to track.
+LEAGUE_AVG_RUNS_PER_GAME = 4.43
+
+
+def regressed_runs(runs, games_played, shrinkage_games):
+    """Regress a team's season-total runs (scored or allowed) toward
+    LEAGUE_AVG_RUNS_PER_GAME, weighted by real games_played against
+    shrinkage_games "games" worth of assumed-average prior belief -- a team
+    5 games into the season gets pulled hard toward league average; a team
+    130 games in barely moves. Returns runs unchanged (graceful no-op) if
+    either input is missing or shrinkage_games is 0.
+
+    Addresses a real gap: without this, a small early-season sample (wild
+    run differential from pure variance) got treated with the same
+    confidence as a full-season sample. Validated via an offline sweep
+    (2025+2026 backtest, 4,301 games): shrinkage_games=10 minimized Brier
+    score on the full dataset (0.2474 -> 0.2469) and showed a much larger
+    effect isolated to early-season games specifically (games where either
+    team had <20 played: 0.2563 -> 0.2515), exactly where the fix targets --
+    see model.py's git history / project notes for the full sweep.
+    """
+    if not runs or not games_played or not shrinkage_games:
+        return runs
+    rate = runs / games_played
+    regressed_rate = (rate * games_played + LEAGUE_AVG_RUNS_PER_GAME * shrinkage_games) / (games_played + shrinkage_games)
+    return regressed_rate * games_played
 
 
 RUNS_PER_OUT = 0.75  # standard sabermetric approximation: each out above/below average is worth ~0.75 runs
@@ -281,6 +355,22 @@ def implied_prob_from_moneyline(ml):
     return -ml / (-ml + 100)
 
 
+def devig_home_prob(home_ml, away_ml):
+    """Remove the vig from a two-sided moneyline to get the market's true
+    implied home-win probability. Lives here (not imported from
+    market_edge.py, which needs implied_prob_from_moneyline from THIS
+    module) purely to avoid a circular import -- market_edge.py has its own
+    copy for its standalone edge-backtest use, kept in sync by being this
+    same three-line calculation.
+    """
+    home_raw = implied_prob_from_moneyline(home_ml)
+    away_raw = implied_prob_from_moneyline(away_ml)
+    total = home_raw + away_raw
+    if total <= 0:
+        return None
+    return home_raw / total
+
+
 def _lineup_strength(team_id, season, game_pk, is_home, use_lineups):
     if not use_lineups:
         return None, None
@@ -300,13 +390,16 @@ def compute_win_prob(inputs, weights: Weights = DEFAULT_WEIGHTS):
     compute the home team's win probability. No network calls -- this is
     the function the weight tuner calls repeatedly.
     """
+    home_games_played = inputs.get("home_games_played")
+    away_games_played = inputs.get("away_games_played")
+    home_runs_scored = regressed_runs(inputs["home_runs_scored"], home_games_played, weights.sample_shrinkage_games)
+    home_runs_allowed = regressed_runs(inputs["home_runs_allowed"], home_games_played, weights.sample_shrinkage_games)
+    away_runs_scored = regressed_runs(inputs["away_runs_scored"], away_games_played, weights.sample_shrinkage_games)
+    away_runs_allowed = regressed_runs(inputs["away_runs_allowed"], away_games_played, weights.sample_shrinkage_games)
+
     park_factor = inputs.get("park_run_factor", 100)
-    home_rs, home_ra = park_adjusted_runs(
-        inputs["home_runs_scored"], inputs["home_runs_allowed"], inputs.get("home_games_played"), park_factor
-    )
-    away_rs, away_ra = park_adjusted_runs(
-        inputs["away_runs_scored"], inputs["away_runs_allowed"], inputs.get("away_games_played"), park_factor
-    )
+    home_rs, home_ra = park_adjusted_runs(home_runs_scored, home_runs_allowed, home_games_played, park_factor)
+    away_rs, away_ra = park_adjusted_runs(away_runs_scored, away_runs_allowed, away_games_played, park_factor)
 
     # Defense: scale each team's (already park-adjusted) runs-allowed by
     # their own OAA, so good fielding gets some credit currently folded
@@ -436,6 +529,13 @@ def compute_win_prob(inputs, weights: Weights = DEFAULT_WEIGHTS):
         + home_road_adj_diff
         + weights.home_field_edge
     )
+    home_prob = 0.5 + weights.shrinkage_factor * (home_prob - 0.5)
+
+    market_home_prob = inputs.get("market_home_prob")
+    if market_home_prob is not None:
+        w = weights.market_blend_weight
+        home_prob = (1 - w) * home_prob + w * market_home_prob
+
     return max(PROB_FLOOR, min(PROB_CEIL, home_prob))
 
 
@@ -464,11 +564,25 @@ def _statcast_inputs(team_id, as_of_date, use_statcast):
 def gather_game_inputs(game, season, as_of_date, use_bullpen=False, use_lineups=False,
                         use_park_factors=False, use_handedness=False, use_rest=False, use_weather=False,
                         use_statcast=False, use_defense=False, use_bullpen_availability=False,
-                        use_travel=False, use_h2h=False, use_home_road_splits=False):
+                        use_travel=False, use_h2h=False, use_home_road_splits=False, market_odds=None):
     """Fetch (and cache, via api.py) all raw per-game inputs the model needs.
     Separated from compute_win_prob so the same fetched inputs can be reused
     across many candidate weight sets during tuning without re-hitting the API.
+
+    market_odds, if given, is a {(home_team, away_team): (home_ml, away_ml)}
+    lookup (the same shape live_odds.fetch_live_odds/market_edge.load_market_odds
+    return) -- when this game has a matching entry, inputs["market_home_prob"]
+    is set to the devigged implied probability for compute_win_prob's
+    market_blend_weight step; otherwise (None passed, or no match for this
+    game) it's left None and that step is a no-op, same graceful-degradation
+    pattern as every other optional signal here.
     """
+    market_home_prob = None
+    if market_odds is not None:
+        line = market_odds.get((game["home_team"], game["away_team"]))
+        if line is not None:
+            market_home_prob = devig_home_prob(*line)
+
     # Point-in-time stats: scoped to what had actually happened before
     # as_of_date, not the team/pitcher's full current-season totals. For a
     # live prediction (as_of_date == today) this is effectively the same as
@@ -586,15 +700,26 @@ def gather_game_inputs(game, season, as_of_date, use_bullpen=False, use_lineups=
         "home_h2h_record": home_h2h_record, "away_h2h_record": away_h2h_record,
         "home_home_split": home_home_split, "home_overall_win_pct": home_overall_win_pct,
         "away_road_split": away_road_split, "away_overall_win_pct": away_overall_win_pct,
+        "market_home_prob": market_home_prob,
     }
 
 
 def predict_game(game, season, as_of_date, use_bullpen=False, use_lineups=False,
                   use_park_factors=False, use_handedness=False, use_rest=False, use_weather=False,
                   use_statcast=False, use_defense=False, use_bullpen_availability=False, use_travel=False,
-                  use_h2h=False, use_home_road_splits=False, weights: Weights = DEFAULT_WEIGHTS):
+                  use_h2h=False, use_home_road_splits=False, weights: Weights = DEFAULT_WEIGHTS,
+                  market_odds=None):
     """Compute a full prediction for a single game dict (as returned by
     api.get_schedule). Returns the game dict merged with all model outputs.
+
+    market_odds is passed straight through to gather_game_inputs -- see its
+    docstring. Defaults to None (no market blend) so every existing caller
+    (market_edge.py, unit_roi_backtest.py, backtest.py's run_backtest for
+    plain --backtest/--calibration runs) keeps behaving exactly as before
+    unless it explicitly opts in; market_edge.py and unit_roi_backtest.py
+    deliberately never pass this, since their whole purpose is comparing the
+    PURE model against the market -- blending market data into the
+    prediction they're comparing would make that comparison meaningless.
     """
     inputs = gather_game_inputs(
         game, season, as_of_date,
@@ -602,7 +727,7 @@ def predict_game(game, season, as_of_date, use_bullpen=False, use_lineups=False,
         use_park_factors=use_park_factors, use_handedness=use_handedness,
         use_rest=use_rest, use_weather=use_weather, use_statcast=use_statcast,
         use_defense=use_defense, use_bullpen_availability=use_bullpen_availability, use_travel=use_travel,
-        use_h2h=use_h2h, use_home_road_splits=use_home_road_splits,
+        use_h2h=use_h2h, use_home_road_splits=use_home_road_splits, market_odds=market_odds,
     )
     home_prob = compute_win_prob(inputs, weights)
 

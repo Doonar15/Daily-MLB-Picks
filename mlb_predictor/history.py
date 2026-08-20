@@ -38,7 +38,8 @@ def _write_all(records):
     HISTORY_FILE.write_text("\n".join(json.dumps(r) for r in records) + ("\n" if records else ""))
 
 
-def record_predictions(game_date: str, preds, top_pick_game_pks, roi_pick_game_pks=()):
+def record_predictions(game_date: str, preds, top_pick_game_pks, roi_pick_game_pks=(),
+                        market_ml_by_game_pk=None, roi_pick_side_by_game_pk=None):
     """Append each of today's predictions to the history log, tagged with
     whether it was one of the day's Top Picks and/or ROI Picks. Re-running
     the predictor for a date that hasn't been graded yet updates the entry
@@ -59,6 +60,23 @@ def record_predictions(game_date: str, preds, top_pick_game_pks, roi_pick_game_p
         number. Grading still uses the LATEST prediction (predicted_prob /
         predicted_winner), since that's the fairest "final word" to judge --
         the history is additional context, not a replacement for it.
+
+    predicted_winner/predicted_prob always reflect the MODEL's own opinion
+    (home_win_prob >= away_win_prob), for honest accuracy tracking -- kept
+    separate from roi_pick_side, which is whichever team
+    predictor._market_favorite_pick actually recommended. These two can
+    genuinely differ (a close-to-50/50 game where the market's own favorite
+    isn't the same side the blended model leans toward); grading an is_roi_pick
+    game against predicted_winner instead of roi_pick_side would silently
+    grade/price the wrong side. roi_pick_side prefers each run's fresh
+    determination but falls back to whatever was already stored if a later
+    run finds none (same pattern as market_ml, right below) -- once a game
+    is first recommended, that's a real opportunity that existed at that
+    price; a later re-run where the line has moved past the cap (or off the
+    market-favored side) means the window closed, not that the earlier pick
+    was wrong. Losing track of which team/price was recommended just because
+    a later run no longer sees it live would make the ledger unable to say
+    what was actually bet.
 
     Once an entry has been graded, it's left alone entirely -- re-predicting
     a past date never silently erases or alters a graded result.
@@ -83,6 +101,25 @@ def record_predictions(game_date: str, preds, top_pick_game_pks, roi_pick_game_p
         was_roi_pick_before = bool(prior and prior.get("is_roi_pick"))
         is_roi_pick_now = pred["game_pk"] in roi_pick_game_pks
 
+        # Prefer this run's freshly-fetched market price; fall back to a
+        # prior run's stored price if this run had no live-odds match (e.g.
+        # a transient fetch failure), rather than overwriting a known price
+        # with None.
+        new_market_ml = market_ml_by_game_pk.get(pred["game_pk"]) if market_ml_by_game_pk else None
+        market_ml = new_market_ml if new_market_ml is not None else (prior.get("market_ml") if prior else None)
+
+        # Same fallback as market_ml, for the same reason: a game that
+        # qualified as a RECOMMENDED pick earlier in the day can legitimately
+        # stop qualifying by the time of a later re-run (the price moved past
+        # the cap, or off the market-favored side entirely) -- that's the
+        # opportunity window closing, not evidence the earlier pick was
+        # wrong. Without this fallback, roi_pick_side would silently go back
+        # to None on that later run while is_roi_pick stays True (sticky),
+        # leaving the ledger unable to say which team was actually
+        # recommended or at what price.
+        new_roi_pick_side = roi_pick_side_by_game_pk.get(pred["game_pk"]) if roi_pick_side_by_game_pk else None
+        roi_pick_side = new_roi_pick_side if new_roi_pick_side is not None else (prior.get("roi_pick_side") if prior else None)
+
         prob_history = list(prior["probability_history"]) if prior and "probability_history" in prior else (
             [{"predicted_prob": prior["predicted_prob"], "recorded_at": prior["recorded_at"]}] if prior else []
         )
@@ -100,11 +137,14 @@ def record_predictions(game_date: str, preds, top_pick_game_pks, roi_pick_game_p
             "home_win_prob": pred["home_win_prob"],
             "is_top_pick": was_top_pick_before or is_top_pick_now,
             "is_roi_pick": was_roi_pick_before or is_roi_pick_now,
+            "market_ml": market_ml,
+            "roi_pick_side": roi_pick_side,
             "probability_history": prob_history,
             "recorded_at": prior["recorded_at"] if prior else now,
             "graded": False,
             "actual_winner": None,
             "correct": None,
+            "roi_correct": None,
         }
 
     _write_all(list(by_key.values()))
@@ -155,6 +195,7 @@ def grade_predictions():
         r["graded"] = True
         r["actual_winner"] = actual_winner
         r["correct"] = actual_winner == r["predicted_winner"]
+        r["roi_correct"] = (actual_winner == r["roi_pick_side"]) if r.get("roi_pick_side") else None
         newly_graded += 1
 
     if newly_graded:
@@ -180,9 +221,10 @@ def get_top_picks_for_date(game_date: str):
 
 def get_roi_picks_for_date(game_date: str):
     """Return the ROI Pick records logged for a single date, graded or not --
-    the narrower, backtested-profitable subset of Top Picks (see
-    calibration.ROI_PICK_CONFIDENCE). Older records predating this field
-    won't have it and are treated as not an ROI pick.
+    games where the market's own favorite was recommended (see
+    calibration.ROI_PICK_FAVORITE_PRICE_CAP), independent of the model's own
+    Top Pick list. Older records predating this field won't have it and are
+    treated as not an ROI pick.
     """
     return [r for r in _read_all() if r["date"] == game_date and r.get("is_roi_pick")]
 
@@ -190,6 +232,14 @@ def get_roi_picks_for_date(game_date: str):
 def summarize(top_picks_only=False, roi_picks_only=False):
     """Return win rate and Brier score over graded predictions, optionally
     restricted to entries that were a day's Top Pick and/or ROI Pick.
+
+    For roi_picks_only, "accuracy" is win rate on the actual RECOMMENDED
+    side (roi_correct, graded against roi_pick_side) rather than the
+    model's own predicted_winner -- these can differ (see record_predictions'
+    docstring), and reporting the model's side here would silently describe
+    the wrong bet. Falls back to correct/predicted_winner for older records
+    that predate roi_pick_side. Brier score always reflects the model's own
+    home_win_prob calibration, not tied to which side was recommended.
     """
     records = [r for r in _read_all() if r["graded"]]
     if top_picks_only:
@@ -201,7 +251,10 @@ def summarize(top_picks_only=False, roi_picks_only=False):
         return {"graded_games": 0, "accuracy": None, "brier_score": None}
 
     n = len(records)
-    correct = sum(1 for r in records if r["correct"])
+    if roi_picks_only:
+        correct = sum(1 for r in records if r.get("roi_correct", r["correct"]))
+    else:
+        correct = sum(1 for r in records if r["correct"])
     brier = sum(
         (r["home_win_prob"] - (1.0 if r["actual_winner"] == r["home_team"] else 0.0)) ** 2
         for r in records
@@ -236,7 +289,7 @@ def print_track_record():
     if roi_picks["graded_games"] > 0:
         print(f"  ROI Picks only:    {roi_picks['graded_games']} graded, "
               f"{roi_picks['accuracy']*100:.1f}% correct, Brier {roi_picks['brier_score']:.4f}  "
-              f"(backtested >={calibration.ROI_PICK_CONFIDENCE*100:.0f}% confidence subset)")
+              f"(market's own favorite, priced -{calibration.ROI_PICK_FAVORITE_PRICE_CAP} or better)")
     else:
         print("  ROI Picks only:    no graded ROI Picks yet")
     if ungraded:

@@ -1,5 +1,7 @@
-"""Generates a local, static HTML report of Top Picks results: what was
-predicted, what actually happened, and a running record over time.
+"""Generates a local, static HTML report of ROI Picks results: what was
+predicted, what actually happened, and a running record + units-based ROI
+over time. Scoped to ROI Picks only (the real expected-value plays vs. the
+market) -- the broader Top Picks pool isn't shown here at all.
 
 Pure rendering layer -- reads history.py's predictions.jsonl (already
 recorded and graded there) and calibration.py's live calibration data (for
@@ -7,8 +9,8 @@ the adjusted-confidence column). Doesn't record or grade anything itself;
 run --grade-picks first so the data here is current.
 
 One rolling file (REPORT_FILE), regenerated in full each call -- the most
-recent date is shown first, with a running season record computed across
-every graded Top Pick. Open it in any browser; no server needed.
+recent date is shown first, with a running record and units total computed
+across every graded ROI Pick. Open it in any browser; no server needed.
 """
 
 import html
@@ -17,7 +19,7 @@ from datetime import date
 from pathlib import Path
 
 from . import calibration, history
-from .model import moneyline_from_prob
+from .market_edge import profit_per_100_wagered
 
 REPORT_DIR = Path(__file__).parent / ".history"
 REPORT_FILE = REPORT_DIR / "picks_report.html"
@@ -40,8 +42,8 @@ VISIBLE_REPORT_FILE = Path(__file__).parent.parent / "picks_report.html"
 PUBLISH_FILE = Path(__file__).parent.parent / "index.html"
 
 
-def _top_pick_records():
-    return [r for r in history.get_all_predictions() if r["is_top_pick"]]
+def _roi_pick_records():
+    return [r for r in history.get_all_predictions() if r.get("is_roi_pick")]
 
 
 def _group_by_date(records):
@@ -51,11 +53,20 @@ def _group_by_date(records):
     return dict(sorted(by_date.items(), reverse=True))
 
 
+def _roi_won(record):
+    """Win/loss on the actual RECOMMENDED side (roi_pick_side), not
+    necessarily the model's own predicted_winner -- these can differ (see
+    history.record_predictions' docstring). Falls back to correct/
+    predicted_winner for older records that predate roi_pick_side.
+    """
+    return record.get("roi_correct", record["correct"])
+
+
 def _season_record(records):
     graded = [r for r in records if r["graded"]]
     if not graded:
         return None
-    wins = sum(1 for r in graded if r["correct"])
+    wins = sum(1 for r in graded if _roi_won(r))
     return wins, len(graded) - wins, len(graded)
 
 
@@ -63,14 +74,43 @@ def _day_record(day_records):
     graded = [r for r in day_records if r["graded"]]
     if not graded:
         return None
-    wins = sum(1 for r in graded if r["correct"])
+    wins = sum(1 for r in graded if _roi_won(r))
     return wins, len(graded) - wins
+
+
+def _unit_profit(record):
+    """Flat-1-unit-risk profit for one graded, priced pick: a loss always
+    costs exactly 1u; a win pays out per the market price. Reuses
+    market_edge.profit_per_100_wagered (same math, already written for the
+    model-vs-market backtest) scaled from a $100 wager down to 1 unit.
+    Returns None if this record has no stored market_ml (ungraded, or
+    graded without a captured price -- e.g. a live-odds fetch failure that
+    day) so callers can exclude it from the units total instead of silently
+    counting it as a 0-profit pick.
+    """
+    if not record["graded"] or record.get("market_ml") is None:
+        return None
+    return profit_per_100_wagered(record["market_ml"], _roi_won(record)) / 100.0
+
+
+def _units_summary(records):
+    """(net_units, n_priced) across every graded record with a stored
+    market_ml. n_priced is also the total units risked under flat-1u-risk
+    staking, so net_units / n_priced is the ROI%.
+    """
+    profits = [p for p in (_unit_profit(r) for r in records) if p is not None]
+    return sum(profits), len(profits)
 
 
 def _result_pill(record):
     if not record["graded"]:
         return ("pending", "Pending")
-    return ("win", "Won") if record["correct"] else ("loss", "Lost")
+    won = _roi_won(record)
+    label = "Won" if won else "Lost"
+    profit = _unit_profit(record)
+    if profit is not None:
+        label = f"{label} {profit:+.2f}u"
+    return ("win" if won else "loss", label)
 
 
 def _movement_note(record):
@@ -90,41 +130,33 @@ def _movement_note(record):
     return f'<div class="pick-movement">moved during the day: {trail}</div>'
 
 
-def _roi_badge_html(record):
-    """Small badge distinguishing a backtested-ROI pick from a plain Top
-    Pick that happened to clear the (much lower) Top Pick floor. Missing
-    is_roi_pick (pre-migration graded records) falls through to
-    "Not recommended" via .get(), same tolerant-access pattern history.py
-    already uses -- an old record is never misread as recommended.
-    """
-    if record.get("is_roi_pick"):
-        return '<div class="roi-badge recommended">Recommended</div>'
-    return '<div class="roi-badge not-recommended">Not recommended</div>'
-
-
 def _pick_row_html(i, record):
     home, away = record["home_team"], record["away_team"]
-    favorite = record["predicted_winner"]
+    favorite = record.get("roi_pick_side") or record["predicted_winner"]
     underdog = away if favorite == home else home
-    raw_prob = record["predicted_prob"]
+    # The model's own stated confidence in WHICHEVER side is being shown as
+    # the pick here -- not necessarily predicted_prob, which is the model's
+    # confidence in its own predicted_winner. Those differ exactly when
+    # roi_pick_side != predicted_winner (see history.record_predictions'
+    # docstring); re-deriving from home_win_prob keeps this number honest
+    # for the side actually displayed, whichever one that is.
+    raw_prob = record["home_win_prob"] if favorite == home else 1 - record["home_win_prob"]
     adjusted, adj_n = calibration.get_adjusted_confidence(raw_prob)
-    ml = moneyline_from_prob(raw_prob)
+    market_ml = record.get("market_ml")
     adj_html = (
         f'<span><span class="metric-label">adj</span> <span class="adjusted-val">{adjusted*100:.1f}%</span></span>'
         if adj_n > 0 else
         '<span><span class="metric-label">adj</span> <span class="adjusted-val">N/A</span></span>'
     )
     pill_class, pill_label = _result_pill(record)
-    ml_str = f"{ml:+d}" if ml is not None else "N/A"
+    ml_str = f"{market_ml:+.0f}" if market_ml is not None else "N/A"
     movement_html = _movement_note(record)
-    roi_badge_html = _roi_badge_html(record)
 
     return f"""
     <div class="pick-row">
       <div class="pick-num">{i}</div>
       <div class="pick-main">
         <div class="pick-matchup"><span class="fav">{html.escape(favorite)}</span> <span class="vs">to beat</span> {html.escape(underdog)}</div>
-        {roi_badge_html}
         <div class="pick-meta">
           <span><span class="metric-label">raw</span> <span class="raw-val">{raw_prob*100:.1f}%</span></span>
           {adj_html}
@@ -163,27 +195,25 @@ def generate():
     """Render the full report to REPORT_FILE. Returns the file path.
     Safe to call with no data yet (renders an empty-state page).
     """
-    records = _top_pick_records()
+    records = _roi_pick_records()
     by_date = _group_by_date(records)
     season = _season_record(records)
     ungraded_count = sum(1 for r in records if not r["graded"])
 
-    roi_records = [r for r in records if r.get("is_roi_pick")]
-    roi_season = _season_record(roi_records)
-    if roi_season:
-        roi_wins, roi_losses, roi_total = roi_season
-        roi_summary_cell = f"""
+    net_units, n_priced = _units_summary(records)
+    if n_priced > 0:
+        units_summary_cell = f"""
     <div class="summary-cell">
-      <div class="summary-label">ROI Picks record</div>
-      <div class="summary-value accent">{roi_wins}–{roi_losses}</div>
-      <div class="summary-sub">{roi_wins / roi_total * 100:.1f}% ({roi_total} graded, >={calibration.ROI_PICK_CONFIDENCE*100:.0f}% conf)</div>
+      <div class="summary-label">Units</div>
+      <div class="summary-value accent">{net_units:+.2f}u</div>
+      <div class="summary-sub">{net_units / n_priced * 100:+.1f}% ROI</div>
     </div>"""
     else:
-        roi_summary_cell = f"""
+        units_summary_cell = f"""
     <div class="summary-cell">
-      <div class="summary-label">ROI Picks record</div>
+      <div class="summary-label">Units</div>
       <div class="summary-value accent">—</div>
-      <div class="summary-sub">no graded ROI picks yet</div>
+      <div class="summary-sub">no priced picks yet</div>
     </div>"""
 
     most_recent_date = next(iter(by_date), None)
@@ -197,7 +227,7 @@ def generate():
       <div class="summary-label">Record</div>
       <div class="summary-value accent">{season_wins}–{season_losses}</div>
       <div class="summary-sub">{season_pct:.1f}% overall</div>
-    </div>{roi_summary_cell}
+    </div>{units_summary_cell}
     <div class="summary-cell">
       <div class="summary-label">Days tracked</div>
       <div class="summary-value">{graded_dates}</div>
@@ -226,7 +256,7 @@ def generate():
     else:
         sections = """
   <div class="empty-state">
-    No Top Picks recorded yet. Run <code>python -m mlb_predictor.predictor</code>
+    No ROI Picks recorded yet. Run <code>python -m mlb_predictor.predictor</code>
     to generate today's picks, then <code>--grade-picks</code> once games are final.
   </div>"""
 
@@ -237,7 +267,7 @@ def generate():
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Top Picks Ledger</title>
+<title>ROI Picks Ledger</title>
 <style>
 :root {{
   --paper: #F7F5EF;
@@ -420,19 +450,6 @@ header {{
 .pick-matchup .fav {{ color: var(--accent); }}
 .pick-matchup .vs {{ color: var(--ink-faint); font-weight: 400; }}
 
-.roi-badge {{
-  display: inline-block;
-  font-size: 10.5px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  padding: 2px 8px;
-  border-radius: 999px;
-  margin-bottom: 7px;
-}}
-.roi-badge.recommended {{ background: var(--accent-soft); color: var(--accent); }}
-.roi-badge.not-recommended {{ background: var(--pending-soft); color: var(--ink-faint); }}
-
 .pick-meta {{
   display: flex;
   gap: 14px;
@@ -484,28 +501,13 @@ header {{
   font-size: 12.5px;
 }}
 
-footer {{
-  margin-top: 36px;
-  padding-top: 16px;
-  border-top: 1px solid var(--rule);
-  font-size: 12px;
-  color: var(--ink-faint);
-  line-height: 1.6;
-}}
-footer code {{
-  background: var(--accent-soft);
-  color: var(--accent);
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 11.5px;
-}}
 </style>
 </head>
 <body>
 <div class="page">
 
   <header>
-    <div class="masthead">Top Picks Ledger</div>
+    <div class="masthead">ROI Picks Ledger</div>
     <div class="date-line">{html.escape(str(date_line))}</div>
   </header>
 
@@ -513,12 +515,6 @@ footer code {{
   </div>
 
   {sections}
-
-  <footer>
-    Generated from <code>mlb_predictor/.history/predictions.jsonl</code> &mdash; Top Picks only.
-    Pending rows update the next time you run <code>--grade-picks</code> after those games go final.
-    Regenerate this page any time with <code>--grade-picks</code> or <code>--report</code>.
-  </footer>
 
 </div>
 </body>
