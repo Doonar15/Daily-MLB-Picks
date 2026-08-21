@@ -205,6 +205,16 @@ header {
   font-variant-numeric: tabular-nums;
 }
 
+.pick-drift {
+  font-size: 11.5px;
+  margin-top: 4px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.pick-drift-critical { color: var(--loss); }
+.pick-drift-warning { color: var(--gold); }
+.pick-drift-info { color: var(--ink-faint); font-weight: 400; }
+
 .result-pill {
   display: inline-flex;
   align-items: center;
@@ -244,24 +254,24 @@ header {
 
   <header>
     <div class="masthead">ROI Picks Ledger</div>
-    <div class="date-line">2026-08-20</div>
+    <div class="date-line">2026-08-21</div>
   </header>
 
   <div class="summary-bar">
     <div class="summary-cell">
       <div class="summary-label">Record</div>
-      <div class="summary-value accent">0–2</div>
-      <div class="summary-sub">0.0% overall</div>
+      <div class="summary-value accent">1–1</div>
+      <div class="summary-sub">50.0% overall</div>
     </div>
     <div class="summary-cell">
       <div class="summary-label">Units</div>
-      <div class="summary-value accent">-2.00u</div>
-      <div class="summary-sub">-100.0% ROI</div>
+      <div class="summary-value accent">-0.05u</div>
+      <div class="summary-sub">-2.4% ROI</div>
     </div>
     <div class="summary-cell">
       <div class="summary-label">Days tracked</div>
-      <div class="summary-value">2</div>
-      <div class="summary-sub">3 total, incl. pending</div>
+      <div class="summary-value">1</div>
+      <div class="summary-sub">2 total, incl. pending</div>
     </div>
     <div class="summary-cell">
       <div class="summary-label">Picks graded</div>
@@ -273,8 +283,47 @@ header {
   
   <section class="day-section">
     <div class="day-header">
-      <div class="day-date">Thu Aug 20 2026</div>
+      <div class="day-date">Fri Aug 21 2026</div>
       <div class="day-record">pending</div>
+    </div>
+    <div class="picks">
+      
+    <div class="pick-row">
+      <div class="pick-num">1</div>
+      <div class="pick-main">
+        <div class="pick-matchup"><span class="fav">Kansas City Royals</span> <span class="vs">to beat</span> Detroit Tigers</div>
+        <div class="pick-meta">
+          <span><span class="metric-label">raw</span> <span class="raw-val">50.4%</span></span>
+          <span><span class="metric-label">adj</span> <span class="adjusted-val">52.5%</span></span>
+          <span><span class="metric-label">ML</span> -110</span>
+        </div>
+        <div class="pick-movement">moved during the day: 51.6% &rarr; 51.8% &rarr; 50.8% &rarr; 50.4%</div>
+        
+      </div>
+      <div class="result-pill pending"><span class="dot"></span>Pending</div>
+    </div>
+
+    <div class="pick-row">
+      <div class="pick-num">2</div>
+      <div class="pick-main">
+        <div class="pick-matchup"><span class="fav">Seattle Mariners</span> <span class="vs">to beat</span> Chicago Cubs</div>
+        <div class="pick-meta">
+          <span><span class="metric-label">raw</span> <span class="raw-val">49.7%</span></span>
+          <span><span class="metric-label">adj</span> <span class="adjusted-val">N/A</span></span>
+          <span><span class="metric-label">ML</span> -110</span>
+        </div>
+        <div class="pick-movement">moved during the day: 50.3% &rarr; 50.5% &rarr; 50.4% &rarr; 50.4% &rarr; 50.3%</div>
+        
+      </div>
+      <div class="result-pill pending"><span class="dot"></span>Pending</div>
+    </div>
+    </div>
+  </section>
+
+  <section class="day-section">
+    <div class="day-header">
+      <div class="day-date">Thu Aug 20 2026</div>
+      <div class="day-record">1–1</div>
     </div>
     <div class="picks">
       
@@ -287,9 +336,10 @@ header {
           <span><span class="metric-label">adj</span> <span class="adjusted-val">52.5%</span></span>
           <span><span class="metric-label">ML</span> -109</span>
         </div>
-        <div class="pick-movement">moved during the day: 50.7% &rarr; 50.7% &rarr; 51.2% &rarr; 53.4% &rarr; 51.2% &rarr; 51.2%</div>
+        <div class="pick-movement">moved during the day: 50.7% &rarr; 50.7% &rarr; 51.2% &rarr; 53.4% &rarr; 51.2% &rarr; 51.2% &rarr; 51.2%</div>
+        
       </div>
-      <div class="result-pill pending"><span class="dot"></span>Pending</div>
+      <div class="result-pill loss"><span class="dot"></span>Lost -1.00u</div>
     </div>
 
     <div class="pick-row">
@@ -297,59 +347,14 @@ header {
       <div class="pick-main">
         <div class="pick-matchup"><span class="fav">New York Yankees</span> <span class="vs">to beat</span> Baltimore Orioles</div>
         <div class="pick-meta">
-          <span><span class="metric-label">raw</span> <span class="raw-val">50.9%</span></span>
+          <span><span class="metric-label">raw</span> <span class="raw-val">50.6%</span></span>
           <span><span class="metric-label">adj</span> <span class="adjusted-val">52.5%</span></span>
-          <span><span class="metric-label">ML</span> -108</span>
+          <span><span class="metric-label">ML</span> -105</span>
         </div>
-        <div class="pick-movement">moved during the day: 51.1% &rarr; 50.9% &rarr; 50.8% &rarr; 52.4% &rarr; 50.9%</div>
+        <div class="pick-movement">moved during the day: 51.1% &rarr; 50.9% &rarr; 50.8% &rarr; 52.4% &rarr; 50.9% &rarr; 50.6%</div>
+        
       </div>
-      <div class="result-pill pending"><span class="dot"></span>Pending</div>
-    </div>
-    </div>
-  </section>
-
-  <section class="day-section">
-    <div class="day-header">
-      <div class="day-date">Wed Aug 19 2026</div>
-      <div class="day-record">0–1</div>
-    </div>
-    <div class="picks">
-      
-    <div class="pick-row">
-      <div class="pick-num">1</div>
-      <div class="pick-main">
-        <div class="pick-matchup"><span class="fav">Milwaukee Brewers</span> <span class="vs">to beat</span> Seattle Mariners</div>
-        <div class="pick-meta">
-          <span><span class="metric-label">raw</span> <span class="raw-val">60.7%</span></span>
-          <span><span class="metric-label">adj</span> <span class="adjusted-val">66.8%</span></span>
-          <span><span class="metric-label">ML</span> -122</span>
-        </div>
-        <div class="pick-movement">moved during the day: 60.9% &rarr; 60.7%</div>
-      </div>
-      <div class="result-pill loss"><span class="dot"></span>Lost -1.00u</div>
-    </div>
-    </div>
-  </section>
-
-  <section class="day-section">
-    <div class="day-header">
-      <div class="day-date">Tue Aug 18 2026</div>
-      <div class="day-record">0–1</div>
-    </div>
-    <div class="picks">
-      
-    <div class="pick-row">
-      <div class="pick-num">1</div>
-      <div class="pick-main">
-        <div class="pick-matchup"><span class="fav">New York Mets</span> <span class="vs">to beat</span> San Diego Padres</div>
-        <div class="pick-meta">
-          <span><span class="metric-label">raw</span> <span class="raw-val">58.3%</span></span>
-          <span><span class="metric-label">adj</span> <span class="adjusted-val">52.5%</span></span>
-          <span><span class="metric-label">ML</span> +104</span>
-        </div>
-        <div class="pick-movement">moved during the day: 58.1% &rarr; 58.3%</div>
-      </div>
-      <div class="result-pill loss"><span class="dot"></span>Lost -1.00u</div>
+      <div class="result-pill win"><span class="dot"></span>Won +0.95u</div>
     </div>
     </div>
   </section>
